@@ -1,0 +1,2497 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 149e82d..06f55a5 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -320,6 +320,10 @@ else()
+ 	message(ERROR "Unsupported compiler")
+ endif()
+ 
++option(GlosGLES1 "Renderer on GLES 1.1 through ARM's Mali driver on EGL/fbdev (goodluckOS)" OFF)
++if(GlosGLES1)
++	set(SharedDefines ${SharedDefines} "GLOS_GLES1")
++endif()
+ set(SharedDefines ${SharedDefines} "$<$<CONFIG:Debug>:_DEBUG>")
+ set(SharedDefines ${SharedDefines} "$<$<NOT:$<CONFIG:Debug>>:FINAL_BUILD>")
+ 
+diff --git a/code/CMakeLists.txt b/code/CMakeLists.txt
+index 3ac6ed1..9d336cb 100644
+--- a/code/CMakeLists.txt
++++ b/code/CMakeLists.txt
+@@ -51,7 +51,11 @@ if(BuildSPEngine OR BuildJK2SPEngine)
+ 		# OpenGL
+ 		find_package(OpenGL REQUIRED)
+ 		set(SPEngineIncludeDirectories ${SPEngineIncludeDirectories} ${OPENGL_INCLUDE_DIR})
+-		set(SPEngineLibraries ${SPEngineLibraries} ${OPENGL_LIBRARIES})
++		if(GlosGLES1)
++			set(SPEngineLibraries ${SPEngineLibraries} ${CMAKE_DL_LIBS})
++		else()
++			set(SPEngineLibraries ${SPEngineLibraries} ${OPENGL_LIBRARIES})
++		endif()
+ 	endif()
+ 
+ 	# OpenAL (is optionally included for Windows)
+@@ -345,6 +349,9 @@ if(BuildSPEngine OR BuildJK2SPEngine)
+ 		"${SharedDir}/sdl/sdl_sound.cpp"
+ 		"${SharedDir}/sdl/sdl_input.cpp"
+ 		"${SharedDir}/sdl/sdl_window.cpp"
++		"${SharedDir}/sdl/sdl_glos.cpp"
++		"${SharedDir}/sdl/sdl_glospad.cpp"
++		"${SharedDir}/sdl/sdl_glos.h"
+ 		"${SharedDir}/sdl/sdl_icon.h"
+ 		)
+ 
+diff --git a/code/client/cl_input.cpp b/code/client/cl_input.cpp
+index 9405176..cbfd037 100644
+--- a/code/client/cl_input.cpp
++++ b/code/client/cl_input.cpp
+@@ -474,9 +474,26 @@ void CL_JoystickEvent( int axis, int value, int time ) {
+ CL_JoystickMove
+ =================
+ */
++#ifdef GLOS_GLES1
++extern float glosPadMove[2], glosPadLook[2], glosLookSpeed;
++extern qboolean glosPadActive;
++#endif
++
+ void CL_JoystickMove( usercmd_t *cmd ) {
+ 	float	anglespeed;
+ 
++#ifdef GLOS_GLES1
++	// goodluckOS twin-stick pad (sdl_glospad.cpp): left stick moves, right stick aims
++	if ( glosPadActive ) {
++		float turn = glosLookSpeed * 0.001f * cls.frametime;
++		cl.viewangles[YAW] -= turn * glosPadLook[0];
++		cl.viewangles[PITCH] += turn * glosPadLook[1];
++		cmd->forwardmove = ClampChar( cmd->forwardmove - (int)( glosPadMove[1] * 127.0f ) );
++		cmd->rightmove = ClampChar( cmd->rightmove + (int)( glosPadMove[0] * 127.0f ) );
++		return;
++	}
++#endif
++
+ 	if ( !in_joystick->integer )
+ 	{
+ 		return;
+diff --git a/code/client/cl_main.cpp b/code/client/cl_main.cpp
+index 1a5c244..318b405 100644
+--- a/code/client/cl_main.cpp
++++ b/code/client/cl_main.cpp
+@@ -1218,7 +1218,8 @@ void CL_Init( void ) {
+ 
+ #ifdef JK2_MODE
+ 	JK2SP_Register("con_text", SP_REGISTER_REQUIRED);	//reference is CON_TEXT
+-	JK2SP_Register("keynames", SP_REGISTER_REQUIRED);	// reference is KEYNAMES
++	// optional: the retail 1.02 data has no strip/keynames.sp (key names then show raw)
++	JK2SP_Register("keynames", 0);	// reference is KEYNAMES
+ #endif
+ 
+ 	Con_Init ();
+diff --git a/code/qcommon/cmd.cpp b/code/qcommon/cmd.cpp
+index a918cd2..9281857 100644
+--- a/code/qcommon/cmd.cpp
++++ b/code/qcommon/cmd.cpp
+@@ -293,6 +293,12 @@ void Cmd_Exec_f( void ) {
+ 	if (!quiet)
+ 		Com_Printf ("execing %s\n", filename);
+ 
++#ifdef GLOS_GLES1
++	// goodluckOS: the pad's bindings are part of the defaults, so they come
++	// right after default.cfg (its unbindall) at startup and on a menu reset
++	if ( !Q_stricmp( filename, "default.cfg" ) )
++		Cbuf_InsertText( "exec glos-pad.cfg\n" );
++#endif
+ 	Cbuf_InsertText (f.c);
+ 
+ 	FS_FreeFile (f.v);
+diff --git a/code/rd-vanilla/CMakeLists.txt b/code/rd-vanilla/CMakeLists.txt
+index 6c24eb2..b6e08f9 100644
+--- a/code/rd-vanilla/CMakeLists.txt
++++ b/code/rd-vanilla/CMakeLists.txt
+@@ -151,7 +151,13 @@ if(BuildSPRdVanilla OR BuildJK2SPRdVanilla)
+ 
+ 	find_package(OpenGL REQUIRED)
+ 	set(SPRDVanillaRendererIncludeDirectories ${SPRDVanillaRendererIncludeDirectories} ${OPENGL_INCLUDE_DIR})
+-	set(SPRDVanillaRendererLibraries ${SPRDVanillaRendererLibraries} ${OPENGL_LIBRARIES})
++	if(GlosGLES1)
++		# desktop GL headers only; tr_glos.cpp loads GLES 1.1 from libMali.so
++		set(SPRDVanillaFiles ${SPRDVanillaFiles} "${SPDir}/rd-vanilla/tr_glos.cpp" "${SPDir}/rd-vanilla/tr_glos.h")
++		set(SPRDVanillaRendererLibraries ${SPRDVanillaRendererLibraries} ${CMAKE_DL_LIBS})
++	else()
++		set(SPRDVanillaRendererLibraries ${SPRDVanillaRendererLibraries} ${OPENGL_LIBRARIES})
++	endif()
+ 
+ 	set(SPRDVanillaRendererIncludeDirectories ${SPRDVanillaRendererIncludeDirectories} ${OpenJKLibDir})
+ 
+diff --git a/code/rd-vanilla/qgl.h b/code/rd-vanilla/qgl.h
+index c9215db..8ba1e68 100644
+--- a/code/rd-vanilla/qgl.h
++++ b/code/rd-vanilla/qgl.h
+@@ -51,6 +51,9 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
+ 
+ #include "glext.h"
+ 
++#ifdef GLOS_GLES1
++#include "tr_glos.h"
++#else
+ #define qglAccum glAccum
+ #define qglAlphaFunc glAlphaFunc
+ #define qglAreTexturesResident glAreTexturesResident
+@@ -388,6 +391,7 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
+ #define qglVertex4sv glVertex4sv
+ #define qglVertexPointer glVertexPointer
+ #define qglViewport glViewport
++#endif // GLOS_GLES1
+ 
+ #if !defined(__APPLE__)
+ extern PFNGLSTENCILOPSEPARATEPROC qglStencilOpSeparate;
+diff --git a/code/rd-vanilla/tr_ghoul2.cpp b/code/rd-vanilla/tr_ghoul2.cpp
+index 5062daf..52fd9d8 100644
+--- a/code/rd-vanilla/tr_ghoul2.cpp
++++ b/code/rd-vanilla/tr_ghoul2.cpp
+@@ -31,6 +31,17 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
+ 
+ #include "tr_common.h"
+ 
++#if defined(GLOS_GLES1) && defined(__ARM_NEON)
++#include <arm_neon.h>
++// (dot(a, p), dot(b, p)) over all four lanes
++static inline float32x2_t G2_NeonDot2( float32x4_t a, float32x4_t b, float32x4_t p )
++{
++	const float32x4_t pa = vmulq_f32( a, p ), pb = vmulq_f32( b, p );
++	return vpadd_f32( vadd_f32( vget_low_f32( pa ), vget_high_f32( pa ) ),
++		vadd_f32( vget_low_f32( pb ), vget_high_f32( pb ) ) );
++}
++#endif
++
+ #include "qcommon/matcomp.h"
+ #if !defined(_QCOMMON_H_)
+ 	#include "../qcommon/qcommon.h"
+@@ -2989,6 +3000,65 @@ void RB_SurfaceGhoul( CRenderableSurface *surf )
+ 		float t2;
+ 		const mdxaBone_t *bone;
+ 		const mdxaBone_t *bone2;
++#if defined(GLOS_GLES1) && defined(__ARM_NEON)
++		// goodluckOS: NEON skinning. The vertex's bone matrices (3x4 rows) are
++		// blended by weight, then the position is transformed once; with weights
++		// summing to 1 this equals the C path's sum of per-bone positions. The
++		// normal comes from the first bone, as there.
++		(void)fTotalWeight; (void)fBoneWeight; (void)t1; (void)t2; (void)bone2;
++		for ( j = 0; j < numVerts; j++, baseVertex++,v++ )
++		{
++#ifdef JK2_MODE
++			bone = &bones->Eval(piBoneReferences[G2_GetVertBoneIndex( v, 0 )]);
++#else
++			bone = &bones->EvalRender(piBoneReferences[G2_GetVertBoneIndex( v, 0 )]);
++#endif // JK2_MODE
++			const int iNumWeights = G2_GetVertWeights( v );
++			float32x4_t r0 = vld1q_f32( bone->matrix[0] );
++			float32x4_t r1 = vld1q_f32( bone->matrix[1] );
++			float32x4_t r2 = vld1q_f32( bone->matrix[2] );
++
++			const float32x4_t n = { v->normal[0], v->normal[1], v->normal[2], 0.0f };
++			float32x2_t nxy = G2_NeonDot2( r0, r1, n );
++			float32x2_t nz = G2_NeonDot2( r2, r2, n );
++			vst1_f32( &tess.normal[baseVertex][0], nxy );
++			vst1_lane_f32( &tess.normal[baseVertex][2], nz, 0 );
++
++			if ( iNumWeights > 1 )
++			{
++				float w = G2_GetVertBoneWeightNotSlow( v, 0 );
++				float total = w;
++				r0 = vmulq_n_f32( r0, w ); r1 = vmulq_n_f32( r1, w ); r2 = vmulq_n_f32( r2, w );
++				for ( k = 1; k < iNumWeights; k++ )
++				{
++#ifdef JK2_MODE
++					bone = &bones->Eval(piBoneReferences[G2_GetVertBoneIndex( v, k )]);
++#else
++					bone = &bones->EvalRender(piBoneReferences[G2_GetVertBoneIndex( v, k )]);
++#endif // JK2_MODE
++					if ( k < iNumWeights - 1 )
++					{
++						w = G2_GetVertBoneWeightNotSlow( v, k );
++						total += w;
++					}
++					else
++						w = 1.0f - total;	// the last weight completes the sum, as in the C path
++					r0 = vmlaq_n_f32( r0, vld1q_f32( bone->matrix[0] ), w );
++					r1 = vmlaq_n_f32( r1, vld1q_f32( bone->matrix[1] ), w );
++					r2 = vmlaq_n_f32( r2, vld1q_f32( bone->matrix[2] ), w );
++				}
++			}
++
++			const float32x4_t p = { v->vertCoords[0], v->vertCoords[1], v->vertCoords[2], 1.0f };
++			float32x2_t xy = G2_NeonDot2( r0, r1, p );
++			float32x2_t z = G2_NeonDot2( r2, r2, p );
++			vst1_f32( &tess.xyz[baseVertex][0], xy );
++			vst1_lane_f32( &tess.xyz[baseVertex][2], z, 0 );
++
++			tess.texCoords[baseVertex][0][0] = pTexCoords[j].texCoords[0];
++			tess.texCoords[baseVertex][0][1] = pTexCoords[j].texCoords[1];
++		}
++#else
+ 		for ( j = 0; j < numVerts; j++, baseVertex++,v++ )
+ 		{
+ #ifdef JK2_MODE
+@@ -3075,6 +3145,7 @@ void RB_SurfaceGhoul( CRenderableSurface *surf )
+ 			tess.texCoords[baseVertex][0][0] = pTexCoords[j].texCoords[0];
+ 			tess.texCoords[baseVertex][0][1] = pTexCoords[j].texCoords[1];
+ 		}
++#endif // GLOS_GLES1 && __ARM_NEON
+ #if 0
+ 	}
+ #endif
+diff --git a/code/rd-vanilla/tr_glos.cpp b/code/rd-vanilla/tr_glos.cpp
+new file mode 100644
+index 0000000..6dcc2b3
+--- /dev/null
++++ b/code/rd-vanilla/tr_glos.cpp
+@@ -0,0 +1,689 @@
++/*
++tr_glos.cpp: the vanilla renderer's desktop GL 1.x calls on GLES 1.1, for ARM's
++Mali-400 driver (r6p2, libMali.so) on goodluckOS.
++
++qgl.h routes every qglX to glos_X here (tr_glos.h). Calls GLES 1.1 has go
++straight through; the rest is emulated:
++- glBegin/glEnd immediate mode: vertexes are collected and drawn from client
++  arrays, quads and polygons as triangles, the game's own arrays put back after.
++- GL_QUADS in glDrawArrays: drawn through a quad index list.
++- texture uploads: GLES wants internal format == format, so RGBA8 data is
++  uploaded as RGBA, or converted to RGB565 / RGBA4444 when the renderer asked
++  for 16-bit textures (r_texturebits 16), which halves texture memory.
++- double-precision calls (glOrtho, glDepthRange, glClearDepth, glClipPlane)
++  go to their float versions; glPolygonMode, glDrawBuffer, display lists and
++  the NV/ARB program extensions are absent (never advertised).
++*/
++#ifdef GLOS_GLES1
++
++#include <dlfcn.h>
++#include <string.h>
++#include <stdlib.h>
++
++#include "tr_local.h"
++
++#ifndef GL_CLAMP_TO_EDGE
++#define GL_CLAMP_TO_EDGE 0x812F
++#endif
++#define GL_UNSIGNED_SHORT_5_6_5_ 0x8363
++#define GL_UNSIGNED_SHORT_4_4_4_4_ 0x8033
++#define GL_GENERATE_MIPMAP_ 0x8191
++#define GL_MAX_TEXTURE_UNITS_ 0x84E2
++
++// ---- GLES 1.1 entry points (libMali.so) ----
++
++#define ES_PASS(X) \
++	X(AlphaFunc) X(BlendFunc) X(Clear) X(ClearColor) X(ClearStencil) X(ColorMask) \
++	X(CullFace) X(DeleteTextures) X(DepthFunc) X(DepthMask) X(Disable) X(Enable) \
++	X(Finish) X(Flush) X(Fogf) X(Fogfv) X(FrontFace) X(GenTextures) X(GetError) \
++	X(GetFloatv) X(GetIntegerv) X(Hint) X(IsEnabled) X(IsTexture) X(LineWidth) X(LoadIdentity) \
++	X(LoadMatrixf) X(MatrixMode) X(MultMatrixf) X(PointSize) X(PolygonOffset) X(PopMatrix) \
++	X(PushMatrix) X(Rotatef) X(Scalef) X(Scissor) X(ShadeModel) X(StencilFunc) \
++	X(StencilMask) X(StencilOp) X(TexEnvf) X(TexEnvfv) X(TexEnvi) X(TexEnviv) X(Translatef) \
++	X(Viewport) X(PixelStorei) X(TexParameterf) X(TexParameteri) X(TexParameterfv) \
++	X(BindTexture) X(EnableClientState) X(DisableClientState) X(VertexPointer) \
++	X(ColorPointer) X(TexCoordPointer) X(NormalPointer) X(DrawArrays) X(DrawElements) \
++	X(TexImage2D) X(TexSubImage2D) X(CopyTexImage2D) X(CopyTexSubImage2D) X(ReadPixels) \
++	X(Color4f) X(Color4ub) X(GetString) X(GetBooleanv) X(Normal3f)
++
++#define ES_DECL(n) static decltype(::gl##n) *es##n;
++ES_PASS(ES_DECL)
++
++static void (*esActiveTexture)(GLenum);
++static void (*esClientActiveTexture)(GLenum);
++static void (*esMultiTexCoord4f)(GLenum, GLfloat, GLfloat, GLfloat, GLfloat);
++static void (*esOrthof)(GLfloat, GLfloat, GLfloat, GLfloat, GLfloat, GLfloat);
++static void (*esFrustumf)(GLfloat, GLfloat, GLfloat, GLfloat, GLfloat, GLfloat);
++static void (*esDepthRangef)(GLfloat, GLfloat);
++static void (*esClearDepthf)(GLfloat);
++static void (*esClipPlanef)(GLenum, const GLfloat *);
++
++static char extensions[256];
++static GLint maxUnits = 1;
++
++static void *ES_Sym( void *lib, const char *name )
++{
++	void *p = dlsym( lib, name );
++	if ( !p )
++		Com_Error( ERR_FATAL, "glos: %s missing in libMali.so", name );
++	return p;
++}
++
++void glos_Init( void )
++{
++	void *lib = dlopen( "libMali.so", RTLD_NOW | RTLD_GLOBAL );
++	if ( !lib )
++		Com_Error( ERR_FATAL, "glos: can't load libMali.so: %s", dlerror() );
++#define ES_LOAD(n) *(void **)&es##n = ES_Sym( lib, "gl" #n );
++	ES_PASS(ES_LOAD)
++	*(void **)&esActiveTexture = ES_Sym( lib, "glActiveTexture" );
++	*(void **)&esClientActiveTexture = ES_Sym( lib, "glClientActiveTexture" );
++	*(void **)&esMultiTexCoord4f = ES_Sym( lib, "glMultiTexCoord4f" );
++	*(void **)&esOrthof = ES_Sym( lib, "glOrthof" );
++	*(void **)&esFrustumf = ES_Sym( lib, "glFrustumf" );
++	*(void **)&esDepthRangef = ES_Sym( lib, "glDepthRangef" );
++	*(void **)&esClearDepthf = ES_Sym( lib, "glClearDepthf" );
++	*(void **)&esClipPlanef = ES_Sym( lib, "glClipPlanef" );
++
++	esGetIntegerv( GL_MAX_TEXTURE_UNITS_, &maxUnits );
++	if ( maxUnits > 2 )
++		maxUnits = 2;	// the renderer uses two
++
++	// What the renderer may use: multitexture and GL_ADD are GLES 1.1 core.
++	const char *es = (const char *)esGetString( GL_EXTENSIONS );
++	Q_strncpyz( extensions, "GL_ARB_multitexture GL_EXT_texture_env_add", sizeof( extensions ) );
++	if ( es && strstr( es, "GL_EXT_texture_filter_anisotropic" ) )
++		Q_strcat( extensions, sizeof( extensions ), " GL_EXT_texture_filter_anisotropic" );
++	Com_Printf( "glos: GLES 1.1 %s, %d texture units\n", (const char *)esGetString( GL_VERSION ), maxUnits );
++	Com_Printf( "glos: GLES extensions: %s\n", es ? es : "(none)" );
++}
++
++bool glos_ExtensionSupported( const char *name )
++{
++	const char *p = extensions;
++	size_t n = strlen( name );
++	while ( ( p = strstr( p, name ) ) != NULL ) {
++		if ( ( p == extensions || p[-1] == ' ' ) && ( p[n] == ' ' || p[n] == 0 ) )
++			return true;
++		p += n;
++	}
++	return false;
++}
++
++// ---- client array state, tracked so immediate mode can put it back ----
++
++struct arrayState_t {
++	bool		enabled;
++	GLint		size;
++	GLenum		type;
++	GLsizei		stride;
++	const void	*ptr;
++};
++
++static arrayState_t vertexArray, colorArray, normalArray, texArray[2];
++static int clientUnit, activeUnit;
++static GLubyte curColor[4] = { 255, 255, 255, 255 };
++static GLuint boundTex[2];
++
++static arrayState_t *ArrayFor( GLenum cap )
++{
++	switch ( cap ) {
++	case GL_VERTEX_ARRAY: return &vertexArray;
++	case GL_COLOR_ARRAY: return &colorArray;
++	case GL_NORMAL_ARRAY: return &normalArray;
++	case GL_TEXTURE_COORD_ARRAY: return &texArray[clientUnit];
++	}
++	return NULL;
++}
++
++void glos_EnableClientState( GLenum cap )
++{
++	arrayState_t *a = ArrayFor( cap );
++	if ( a ) a->enabled = true;
++	esEnableClientState( cap );
++}
++
++void glos_DisableClientState( GLenum cap )
++{
++	arrayState_t *a = ArrayFor( cap );
++	if ( a ) a->enabled = false;
++	esDisableClientState( cap );
++}
++
++static void SetArray( arrayState_t *a, GLint size, GLenum type, GLsizei stride, const void *ptr )
++{
++	a->size = size; a->type = type; a->stride = stride; a->ptr = ptr;
++}
++
++void glos_VertexPointer( GLint size, GLenum type, GLsizei stride, const GLvoid *ptr )
++{
++	SetArray( &vertexArray, size, type, stride, ptr );
++	esVertexPointer( size, type, stride, ptr );
++}
++
++void glos_ColorPointer( GLint size, GLenum type, GLsizei stride, const GLvoid *ptr )
++{
++	SetArray( &colorArray, size, type, stride, ptr );
++	esColorPointer( size, type, stride, ptr );
++}
++
++void glos_NormalPointer( GLenum type, GLsizei stride, const GLvoid *ptr )
++{
++	SetArray( &normalArray, 3, type, stride, ptr );
++	esNormalPointer( type, stride, ptr );
++}
++
++void glos_TexCoordPointer( GLint size, GLenum type, GLsizei stride, const GLvoid *ptr )
++{
++	SetArray( &texArray[clientUnit], size, type, stride, ptr );
++	esTexCoordPointer( size, type, stride, ptr );
++}
++
++static void APIENTRY glos_ClientActiveTexture( GLenum unit )
++{
++	clientUnit = unit - GL_TEXTURE0_ARB;
++	esClientActiveTexture( unit );
++}
++
++static void APIENTRY glos_ActiveTexture( GLenum unit )
++{
++	activeUnit = unit - GL_TEXTURE0_ARB;
++	esActiveTexture( unit );
++}
++
++// ---- immediate mode ----
++
++struct immVert_t {
++	float	xyz[3];
++	float	st[2][2];
++	GLubyte	rgba[4];
++};
++
++#define IMM_MAX 4096
++static immVert_t imm[IMM_MAX];
++static int immCount;
++static GLenum immPrim;
++static bool inBegin;
++static float curST[2][2];
++static unsigned short immIndexes[IMM_MAX * 3 / 2];
++
++void glos_Begin( GLenum mode )
++{
++	immPrim = mode;
++	immCount = 0;
++	inBegin = true;
++}
++
++static void ImmVertex( float x, float y, float z )
++{
++	if ( immCount >= IMM_MAX )
++		return;
++	immVert_t *v = &imm[immCount++];
++	v->xyz[0] = x; v->xyz[1] = y; v->xyz[2] = z;
++	memcpy( v->st, curST, sizeof( curST ) );
++	memcpy( v->rgba, curColor, 4 );
++}
++
++void glos_Vertex2f( GLfloat x, GLfloat y ) { ImmVertex( x, y, 0 ); }
++void glos_Vertex2fv( const GLfloat *v ) { ImmVertex( v[0], v[1], 0 ); }
++void glos_Vertex2i( GLint x, GLint y ) { ImmVertex( x, y, 0 ); }
++void glos_Vertex3f( GLfloat x, GLfloat y, GLfloat z ) { ImmVertex( x, y, z ); }
++void glos_Vertex3fv( const GLfloat *v ) { ImmVertex( v[0], v[1], v[2] ); }
++
++void glos_TexCoord2f( GLfloat s, GLfloat t ) { curST[0][0] = s; curST[0][1] = t; }
++void glos_TexCoord2fv( const GLfloat *v ) { curST[0][0] = v[0]; curST[0][1] = v[1]; }
++
++static void APIENTRY glos_MultiTexCoord2f( GLenum unit, GLfloat s, GLfloat t )
++{
++	int u = unit - GL_TEXTURE0_ARB;
++	if ( u < 0 || u > 1 )
++		return;
++	curST[u][0] = s; curST[u][1] = t;
++	if ( !inBegin )
++		esMultiTexCoord4f( unit, s, t, 0, 1 );
++}
++
++static GLubyte ToByte( float f )
++{
++	if ( f <= 0 ) return 0;
++	if ( f >= 1 ) return 255;
++	return (GLubyte)( f * 255.0f + 0.5f );
++}
++
++static void SetColor( GLubyte r, GLubyte g, GLubyte b, GLubyte a )
++{
++	curColor[0] = r; curColor[1] = g; curColor[2] = b; curColor[3] = a;
++	if ( !inBegin )
++		esColor4ub( r, g, b, a );
++}
++
++void glos_Color3f( GLfloat r, GLfloat g, GLfloat b ) { SetColor( ToByte( r ), ToByte( g ), ToByte( b ), 255 ); }
++void glos_Color3fv( const GLfloat *v ) { glos_Color3f( v[0], v[1], v[2] ); }
++void glos_Color4f( GLfloat r, GLfloat g, GLfloat b, GLfloat a ) { SetColor( ToByte( r ), ToByte( g ), ToByte( b ), ToByte( a ) ); }
++void glos_Color4fv( const GLfloat *v ) { glos_Color4f( v[0], v[1], v[2], v[3] ); }
++void glos_Color3ub( GLubyte r, GLubyte g, GLubyte b ) { SetColor( r, g, b, 255 ); }
++void glos_Color4ub( GLubyte r, GLubyte g, GLubyte b, GLubyte a ) { SetColor( r, g, b, a ); }
++void glos_Color4ubv( const GLubyte *v ) { SetColor( v[0], v[1], v[2], v[3] ); }
++
++// one vertex from the game's float vertex/texcoord and byte color arrays
++void glos_ArrayElement( GLint i )
++{
++	if ( texArray[0].enabled && texArray[0].type == GL_FLOAT ) {
++		const float *st = (const float *)( (const byte *)texArray[0].ptr + i * ( texArray[0].stride ? texArray[0].stride : texArray[0].size * 4 ) );
++		curST[0][0] = st[0]; curST[0][1] = st[1];
++	}
++	if ( colorArray.enabled && colorArray.type == GL_UNSIGNED_BYTE ) {
++		const GLubyte *c = (const GLubyte *)colorArray.ptr + i * ( colorArray.stride ? colorArray.stride : 4 );
++		memcpy( curColor, c, 4 );
++	}
++	if ( vertexArray.enabled && vertexArray.type == GL_FLOAT ) {
++		const float *v = (const float *)( (const byte *)vertexArray.ptr + i * ( vertexArray.stride ? vertexArray.stride : vertexArray.size * 4 ) );
++		ImmVertex( v[0], v[1], vertexArray.size > 2 ? v[2] : 0 );
++	}
++}
++
++static void RestoreArray( GLenum cap, const arrayState_t *a )
++{
++	if ( a->enabled ) esEnableClientState( cap ); else esDisableClientState( cap );
++}
++
++void glos_End( void )
++{
++	inBegin = false;
++	if ( immCount == 0 )
++		return;
++
++	GLenum prim = immPrim;
++	int count = immCount;
++	bool indexed = false;
++	switch ( immPrim ) {
++	case GL_QUADS:
++		count = 0;
++		for ( int q = 0; q + 3 < immCount; q += 4 ) {
++			immIndexes[count++] = q; immIndexes[count++] = q + 1; immIndexes[count++] = q + 2;
++			immIndexes[count++] = q + 2; immIndexes[count++] = q + 3; immIndexes[count++] = q;
++		}
++		prim = GL_TRIANGLES;
++		indexed = true;
++		break;
++	case GL_POLYGON:
++		prim = GL_TRIANGLE_FAN;
++		break;
++	case GL_QUAD_STRIP:
++		prim = GL_TRIANGLE_STRIP;
++		break;
++	}
++
++	esVertexPointer( 3, GL_FLOAT, sizeof( immVert_t ), imm[0].xyz );
++	esEnableClientState( GL_VERTEX_ARRAY );
++	esColorPointer( 4, GL_UNSIGNED_BYTE, sizeof( immVert_t ), imm[0].rgba );
++	esEnableClientState( GL_COLOR_ARRAY );
++	if ( normalArray.enabled )
++		esDisableClientState( GL_NORMAL_ARRAY );
++	for ( int u = 0; u < maxUnits; u++ ) {
++		esClientActiveTexture( GL_TEXTURE0_ARB + u );
++		esTexCoordPointer( 2, GL_FLOAT, sizeof( immVert_t ), imm[0].st[u] );
++		esEnableClientState( GL_TEXTURE_COORD_ARRAY );
++	}
++
++	if ( indexed )
++		esDrawElements( prim, count, GL_UNSIGNED_SHORT, immIndexes );
++	else
++		esDrawArrays( prim, 0, count );
++
++	// put the game's arrays back
++	for ( int u = 0; u < maxUnits; u++ ) {
++		const arrayState_t *a = &texArray[u];
++		esClientActiveTexture( GL_TEXTURE0_ARB + u );
++		if ( a->ptr )
++			esTexCoordPointer( a->size, a->type, a->stride, a->ptr );
++		RestoreArray( GL_TEXTURE_COORD_ARRAY, a );
++	}
++	esClientActiveTexture( GL_TEXTURE0_ARB + clientUnit );
++	if ( vertexArray.ptr )
++		esVertexPointer( vertexArray.size, vertexArray.type, vertexArray.stride, vertexArray.ptr );
++	RestoreArray( GL_VERTEX_ARRAY, &vertexArray );
++	if ( colorArray.ptr )
++		esColorPointer( colorArray.size, colorArray.type, colorArray.stride, colorArray.ptr );
++	RestoreArray( GL_COLOR_ARRAY, &colorArray );
++	if ( normalArray.enabled )
++		esEnableClientState( GL_NORMAL_ARRAY );
++	// the current color is undefined after drawing with a color array
++	esColor4ub( curColor[0], curColor[1], curColor[2], curColor[3] );
++}
++
++// ---- draws ----
++
++static unsigned short *quadIndexes;
++static int quadIndexVerts;
++
++void glos_DrawArrays( GLenum mode, GLint first, GLsizei count )
++{
++	if ( mode != GL_QUADS ) {
++		esDrawArrays( mode, first, count );
++		return;
++	}
++	int quads = count / 4;
++	if ( first + count > 65536 || quads == 0 )
++		return;
++	if ( first + count > quadIndexVerts ) {
++		quadIndexVerts = first + count;
++		quadIndexes = (unsigned short *)realloc( quadIndexes, quadIndexVerts / 4 * 6 * sizeof( unsigned short ) + 12 );
++	}
++	unsigned short *ix = quadIndexes;
++	for ( int q = 0; q < quads; q++ ) {
++		int b = first + q * 4;
++		*ix++ = b; *ix++ = b + 1; *ix++ = b + 2;
++		*ix++ = b + 2; *ix++ = b + 3; *ix++ = b;
++	}
++	esDrawElements( GL_TRIANGLES, quads * 6, GL_UNSIGNED_SHORT, quadIndexes );
++}
++
++void glos_DrawElements( GLenum mode, GLsizei count, GLenum type, const GLvoid *indexes )
++{
++	if ( type == GL_UNSIGNED_INT ) {
++		static unsigned short *shorts;
++		static int max;
++		if ( count > max ) {
++			max = count;
++			shorts = (unsigned short *)realloc( shorts, max * sizeof( unsigned short ) );
++		}
++		const unsigned int *in = (const unsigned int *)indexes;
++		for ( int i = 0; i < count; i++ )
++			shorts[i] = in[i];
++		esDrawElements( mode, count, GL_UNSIGNED_SHORT, shorts );
++		return;
++	}
++	esDrawElements( mode, count, type, indexes );
++}
++
++// ---- state ----
++
++static bool Unsupported( GLenum cap )
++{
++	switch ( cap ) {
++	case GL_TEXTURE_GEN_S: case GL_TEXTURE_GEN_T: case GL_TEXTURE_GEN_R: case GL_TEXTURE_GEN_Q:
++	case GL_POLYGON_OFFSET_LINE: case GL_POLYGON_STIPPLE: case GL_LINE_STIPPLE:
++	case GL_TEXTURE_RECTANGLE_ARB: case GL_REGISTER_COMBINERS_NV:
++	case GL_VERTEX_PROGRAM_ARB: case GL_FRAGMENT_PROGRAM_ARB:
++	case GL_TEXTURE_1D:
++		return true;
++	}
++	return false;
++}
++
++void glos_Enable( GLenum cap ) { if ( !Unsupported( cap ) ) esEnable( cap ); }
++void glos_Disable( GLenum cap ) { if ( !Unsupported( cap ) ) esDisable( cap ); }
++GLboolean glos_IsEnabled( GLenum cap ) { return Unsupported( cap ) ? GL_FALSE : esIsEnabled( cap ); }
++
++void glos_Fogi( GLenum pname, GLint param ) { if ( pname != GL_FOG_DISTANCE_MODE_NV ) esFogf( pname, (GLfloat)param ); }
++void glos_Fogf( GLenum pname, GLfloat param ) { esFogf( pname, param ); }
++void glos_Fogfv( GLenum pname, const GLfloat *params ) { esFogfv( pname, params ); }
++
++void glos_ClearDepth( GLclampd d ) { esClearDepthf( (GLfloat)d ); }
++void glos_DepthRange( GLclampd n, GLclampd f ) { esDepthRangef( (GLfloat)n, (GLfloat)f ); }
++void glos_Ortho( GLdouble l, GLdouble r, GLdouble b, GLdouble t, GLdouble n, GLdouble f ) { esOrthof( l, r, b, t, n, f ); }
++void glos_Frustum( GLdouble l, GLdouble r, GLdouble b, GLdouble t, GLdouble n, GLdouble f ) { esFrustumf( l, r, b, t, n, f ); }
++void glos_ClipPlane( GLenum plane, const GLdouble *eq )
++{
++	GLfloat f[4] = { (GLfloat)eq[0], (GLfloat)eq[1], (GLfloat)eq[2], (GLfloat)eq[3] };
++	esClipPlanef( plane, f );
++}
++
++void glos_PolygonMode( GLenum face, GLenum mode ) {}
++void glos_DrawBuffer( GLenum mode ) {}
++void glos_CallList( GLuint list ) {}
++void glos_NewList( GLuint list, GLenum mode ) {}
++void glos_EndList( void ) {}
++GLuint glos_GenLists( GLsizei range ) { return 0; }
++void glos_DeleteLists( GLuint list, GLsizei range ) {}
++
++static GLenum WrapMode( GLenum pname, GLint param )
++{
++	if ( ( pname == GL_TEXTURE_WRAP_S || pname == GL_TEXTURE_WRAP_T ) && param == GL_CLAMP )
++		return GL_CLAMP_TO_EDGE;
++	return param;
++}
++
++static bool TexParamOk( GLenum target, GLenum pname )
++{
++	if ( target != GL_TEXTURE_2D )
++		return false;
++	switch ( pname ) {
++	case GL_TEXTURE_MIN_FILTER: case GL_TEXTURE_MAG_FILTER:
++	case GL_TEXTURE_WRAP_S: case GL_TEXTURE_WRAP_T: case GL_GENERATE_MIPMAP_:
++		return true;
++	case GL_TEXTURE_MAX_ANISOTROPY_EXT:
++		return glos_ExtensionSupported( "GL_EXT_texture_filter_anisotropic" );
++	}
++	return false;
++}
++
++void glos_TexParameteri( GLenum target, GLenum pname, GLint param )
++{
++	if ( TexParamOk( target, pname ) )
++		esTexParameteri( target, pname, WrapMode( pname, param ) );
++}
++
++void glos_TexParameterf( GLenum target, GLenum pname, GLfloat param )
++{
++	if ( !TexParamOk( target, pname ) )
++		return;
++	if ( pname == GL_TEXTURE_MAX_ANISOTROPY_EXT )
++		esTexParameterf( target, pname, param );
++	else
++		esTexParameteri( target, pname, WrapMode( pname, (GLint)param ) );
++}
++
++void glos_TexParameterfv( GLenum target, GLenum pname, const GLfloat *params )
++{
++	glos_TexParameterf( target, pname, params[0] );
++}
++
++void glos_TexEnvf( GLenum target, GLenum pname, GLfloat param ) { esTexEnvi( target, pname, (GLint)param ); }
++void glos_TexEnvi( GLenum target, GLenum pname, GLint param ) { esTexEnvi( target, pname, param ); }
++void glos_TexEnvfv( GLenum target, GLenum pname, const GLfloat *params ) { esTexEnvfv( target, pname, params ); }
++
++// ---- textures ----
++
++enum { TEX_RGBA8, TEX_565, TEX_4444 };
++
++#define MAX_TRACKED_TEXTURES 16384
++static byte texKind[MAX_TRACKED_TEXTURES];
++static byte *convBuf;
++static int convBufSize;
++
++void glos_BindTexture( GLenum target, GLuint tex )
++{
++	if ( target != GL_TEXTURE_2D )
++		return;
++	boundTex[activeUnit & 1] = tex;
++	esBindTexture( target, tex );
++}
++
++static int KindOf( GLint internal )
++{
++	switch ( internal ) {
++	case GL_RGB5: case GL_RGB4: case GL_R3_G3_B2: case GL_RGB4_S3TC:
++		return TEX_565;
++	case GL_RGBA4: case GL_RGB5_A1: case GL_RGBA2:
++		return TEX_4444;
++	}
++	return TEX_RGBA8;
++}
++
++static byte *ConvBuf( int bytes )
++{
++	if ( bytes > convBufSize ) {
++		convBufSize = bytes;
++		convBuf = (byte *)realloc( convBuf, bytes );
++	}
++	return convBuf;
++}
++
++// RGBA8 pixels to 16-bit ones; returns the converted data.
++static const void *Convert( int kind, int w, int h, const byte *src )
++{
++	int n = w * h;
++	unsigned short *dst = (unsigned short *)ConvBuf( n * 2 );
++	if ( kind == TEX_565 ) {
++		for ( int i = 0; i < n; i++, src += 4 )
++			dst[i] = ( ( src[0] >> 3 ) << 11 ) | ( ( src[1] >> 2 ) << 5 ) | ( src[2] >> 3 );
++	} else {
++		for ( int i = 0; i < n; i++, src += 4 )
++			dst[i] = ( ( src[0] >> 4 ) << 12 ) | ( ( src[1] >> 4 ) << 8 ) | ( ( src[2] >> 4 ) << 4 ) | ( src[3] >> 4 );
++	}
++	return dst;
++}
++
++static void Upload16( bool sub, int kind, GLint level, GLint x, GLint y, GLsizei w, GLsizei h, const GLvoid *pixels )
++{
++	GLenum fmt = kind == TEX_565 ? GL_RGB : GL_RGBA;
++	GLenum type = kind == TEX_565 ? GL_UNSIGNED_SHORT_5_6_5_ : GL_UNSIGNED_SHORT_4_4_4_4_;
++	const void *data = pixels ? Convert( kind, w, h, (const byte *)pixels ) : NULL;
++	esPixelStorei( GL_UNPACK_ALIGNMENT, 2 );
++	if ( sub )
++		esTexSubImage2D( GL_TEXTURE_2D, level, x, y, w, h, fmt, type, data );
++	else
++		esTexImage2D( GL_TEXTURE_2D, level, fmt, w, h, 0, fmt, type, data );
++	esPixelStorei( GL_UNPACK_ALIGNMENT, 4 );
++}
++
++void glos_TexImage2D( GLenum target, GLint level, GLint internal, GLsizei w, GLsizei h, GLint border, GLenum format, GLenum type, const GLvoid *pixels )
++{
++	if ( target != GL_TEXTURE_2D )
++		return;
++	GLuint tex = boundTex[activeUnit & 1];
++	if ( format == GL_RGBA && type == GL_UNSIGNED_BYTE ) {
++		int kind = KindOf( internal );
++		if ( tex < MAX_TRACKED_TEXTURES )
++			texKind[tex] = kind;
++		if ( kind != TEX_RGBA8 ) {
++			Upload16( false, kind, level, 0, 0, w, h, pixels );
++			return;
++		}
++		esTexImage2D( target, level, GL_RGBA, w, h, 0, GL_RGBA, type, pixels );
++		return;
++	}
++	if ( tex < MAX_TRACKED_TEXTURES )
++		texKind[tex] = TEX_RGBA8;
++	esTexImage2D( target, level, format, w, h, 0, format, type, pixels );
++}
++
++void glos_TexSubImage2D( GLenum target, GLint level, GLint x, GLint y, GLsizei w, GLsizei h, GLenum format, GLenum type, const GLvoid *pixels )
++{
++	if ( target != GL_TEXTURE_2D )
++		return;
++	GLuint tex = boundTex[activeUnit & 1];
++	int kind = tex < MAX_TRACKED_TEXTURES ? texKind[tex] : TEX_RGBA8;
++	if ( kind != TEX_RGBA8 && format == GL_RGBA && type == GL_UNSIGNED_BYTE ) {
++		Upload16( true, kind, level, x, y, w, h, pixels );
++		return;
++	}
++	esTexSubImage2D( target, level, x, y, w, h, format, type, pixels );
++}
++
++void glos_CopyTexImage2D( GLenum target, GLint level, GLenum internal, GLint x, GLint y, GLsizei w, GLsizei h, GLint border )
++{
++	if ( target != GL_TEXTURE_2D )
++		return;
++	esCopyTexImage2D( target, level, GL_RGB, x, y, w, h, 0 );
++}
++
++void glos_CopyTexSubImage2D( GLenum target, GLint level, GLint xo, GLint yo, GLint x, GLint y, GLsizei w, GLsizei h )
++{
++	if ( target == GL_TEXTURE_2D )
++		esCopyTexSubImage2D( target, level, xo, yo, x, y, w, h );
++}
++
++void glos_ReadPixels( GLint x, GLint y, GLsizei w, GLsizei h, GLenum format, GLenum type, GLvoid *pixels )
++{
++	if ( format == GL_RGBA && type == GL_UNSIGNED_BYTE ) {
++		esReadPixels( x, y, w, h, format, type, pixels );
++		return;
++	}
++	if ( format == GL_RGB && type == GL_UNSIGNED_BYTE ) {
++		byte *rgba = ConvBuf( w * h * 4 );
++		esReadPixels( x, y, w, h, GL_RGBA, GL_UNSIGNED_BYTE, rgba );
++		byte *out = (byte *)pixels;
++		for ( int i = 0; i < w * h; i++ ) {
++			out[i * 3] = rgba[i * 4]; out[i * 3 + 1] = rgba[i * 4 + 1]; out[i * 3 + 2] = rgba[i * 4 + 2];
++		}
++		return;
++	}
++	// depth and stencil can't be read on GLES: report "nothing in front"
++	if ( format == GL_DEPTH_COMPONENT && type == GL_FLOAT ) {
++		for ( int i = 0; i < w * h; i++ )
++			((float *)pixels)[i] = 1.0f;
++		return;
++	}
++	memset( pixels, 0, w * h );
++}
++
++// ---- queries and plain pass-throughs ----
++
++const GLubyte *glos_GetString( GLenum name )
++{
++	if ( name == GL_EXTENSIONS )
++		return (const GLubyte *)extensions;
++	return esGetString( name );
++}
++
++void glos_GetIntegerv( GLenum pname, GLint *params )
++{
++	if ( pname == GL_MAX_TEXTURE_UNITS_ ) {
++		*params = maxUnits;
++		return;
++	}
++	esGetIntegerv( pname, params );
++}
++
++void glos_AlphaFunc( GLenum f, GLclampf r ) { esAlphaFunc( f, r ); }
++void glos_BlendFunc( GLenum s, GLenum d ) { esBlendFunc( s, d ); }
++void glos_Clear( GLbitfield m ) { esClear( m ); }
++void glos_ClearColor( GLclampf r, GLclampf g, GLclampf b, GLclampf a ) { esClearColor( r, g, b, a ); }
++void glos_ClearStencil( GLint s ) { esClearStencil( s ); }
++void glos_ColorMask( GLboolean r, GLboolean g, GLboolean b, GLboolean a ) { esColorMask( r, g, b, a ); }
++void glos_CullFace( GLenum m ) { esCullFace( m ); }
++void glos_DeleteTextures( GLsizei n, const GLuint *t ) { esDeleteTextures( n, t ); }
++void glos_DepthFunc( GLenum f ) { esDepthFunc( f ); }
++void glos_DepthMask( GLboolean f ) { esDepthMask( f ); }
++void glos_Finish( void ) { esFinish(); }
++void glos_Flush( void ) { esFlush(); }
++void glos_FrontFace( GLenum m ) { esFrontFace( m ); }
++void glos_GenTextures( GLsizei n, GLuint *t ) { esGenTextures( n, t ); }
++GLenum glos_GetError( void ) { return esGetError(); }
++void glos_GetFloatv( GLenum p, GLfloat *v ) { esGetFloatv( p, v ); }
++void glos_GetBooleanv( GLenum p, GLboolean *v ) { esGetBooleanv( p, v ); }
++void glos_Hint( GLenum t, GLenum m ) { esHint( t, m ); }
++GLboolean glos_IsTexture( GLuint t ) { return esIsTexture( t ); }
++void glos_LineWidth( GLfloat w ) { esLineWidth( w ); }
++void glos_LoadIdentity( void ) { esLoadIdentity(); }
++void glos_LoadMatrixf( const GLfloat *m ) { esLoadMatrixf( m ); }
++void glos_MatrixMode( GLenum m ) { esMatrixMode( m ); }
++void glos_MultMatrixf( const GLfloat *m ) { esMultMatrixf( m ); }
++void glos_PointSize( GLfloat s ) { esPointSize( s ); }
++void glos_PolygonOffset( GLfloat f, GLfloat u ) { esPolygonOffset( f, u ); }
++void glos_PopMatrix( void ) { esPopMatrix(); }
++void glos_PushMatrix( void ) { esPushMatrix(); }
++void glos_Rotatef( GLfloat a, GLfloat x, GLfloat y, GLfloat z ) { esRotatef( a, x, y, z ); }
++void glos_Scalef( GLfloat x, GLfloat y, GLfloat z ) { esScalef( x, y, z ); }
++void glos_Scissor( GLint x, GLint y, GLsizei w, GLsizei h ) { esScissor( x, y, w, h ); }
++void glos_ShadeModel( GLenum m ) { esShadeModel( m ); }
++void glos_StencilFunc( GLenum f, GLint r, GLuint m ) { esStencilFunc( f, r, m ); }
++void glos_StencilMask( GLuint m ) { esStencilMask( m ); }
++void glos_StencilOp( GLenum f, GLenum zf, GLenum zp ) { esStencilOp( f, zf, zp ); }
++void glos_Translatef( GLfloat x, GLfloat y, GLfloat z ) { esTranslatef( x, y, z ); }
++void glos_Viewport( GLint x, GLint y, GLsizei w, GLsizei h ) { esViewport( x, y, w, h ); }
++void glos_PixelStorei( GLenum p, GLint v ) { esPixelStorei( p, v ); }
++void glos_Normal3f( GLfloat x, GLfloat y, GLfloat z ) { esNormal3f( x, y, z ); }
++
++void *glos_GetProcAddress( const char *name )
++{
++	if ( !strcmp( name, "glActiveTextureARB" ) ) return (void *)glos_ActiveTexture;
++	if ( !strcmp( name, "glClientActiveTextureARB" ) ) return (void *)glos_ClientActiveTexture;
++	if ( !strcmp( name, "glMultiTexCoord2fARB" ) ) return (void *)glos_MultiTexCoord2f;
++	return NULL;
++}
++
++#endif // GLOS_GLES1
+diff --git a/code/rd-vanilla/tr_glos.h b/code/rd-vanilla/tr_glos.h
+new file mode 100644
+index 0000000..b238e22
+--- /dev/null
++++ b/code/rd-vanilla/tr_glos.h
+@@ -0,0 +1,679 @@
++/*
++tr_glos.h: the vanilla renderer's desktop GL 1.x calls, routed to tr_glos.cpp,
++which runs them on GLES 1.1 (ARM's Mali-400 driver on goodluckOS).
++Every qglX becomes glos_X with glX's own prototype.
++*/
++#pragma once
++
++extern decltype(::glAccum) glos_Accum;
++#define qglAccum glos_Accum
++extern decltype(::glAlphaFunc) glos_AlphaFunc;
++#define qglAlphaFunc glos_AlphaFunc
++extern decltype(::glAreTexturesResident) glos_AreTexturesResident;
++#define qglAreTexturesResident glos_AreTexturesResident
++extern decltype(::glArrayElement) glos_ArrayElement;
++#define qglArrayElement glos_ArrayElement
++extern decltype(::glBegin) glos_Begin;
++#define qglBegin glos_Begin
++extern decltype(::glBindTexture) glos_BindTexture;
++#define qglBindTexture glos_BindTexture
++extern decltype(::glBitmap) glos_Bitmap;
++#define qglBitmap glos_Bitmap
++extern decltype(::glBlendFunc) glos_BlendFunc;
++#define qglBlendFunc glos_BlendFunc
++extern decltype(::glCallList) glos_CallList;
++#define qglCallList glos_CallList
++extern decltype(::glCallLists) glos_CallLists;
++#define qglCallLists glos_CallLists
++extern decltype(::glClear) glos_Clear;
++#define qglClear glos_Clear
++extern decltype(::glClearAccum) glos_ClearAccum;
++#define qglClearAccum glos_ClearAccum
++extern decltype(::glClearColor) glos_ClearColor;
++#define qglClearColor glos_ClearColor
++extern decltype(::glClearDepth) glos_ClearDepth;
++#define qglClearDepth glos_ClearDepth
++extern decltype(::glClearIndex) glos_ClearIndex;
++#define qglClearIndex glos_ClearIndex
++extern decltype(::glClearStencil) glos_ClearStencil;
++#define qglClearStencil glos_ClearStencil
++extern decltype(::glClipPlane) glos_ClipPlane;
++#define qglClipPlane glos_ClipPlane
++extern decltype(::glColor3b) glos_Color3b;
++#define qglColor3b glos_Color3b
++extern decltype(::glColor3bv) glos_Color3bv;
++#define qglColor3bv glos_Color3bv
++extern decltype(::glColor3d) glos_Color3d;
++#define qglColor3d glos_Color3d
++extern decltype(::glColor3dv) glos_Color3dv;
++#define qglColor3dv glos_Color3dv
++extern decltype(::glColor3f) glos_Color3f;
++#define qglColor3f glos_Color3f
++extern decltype(::glColor3fv) glos_Color3fv;
++#define qglColor3fv glos_Color3fv
++extern decltype(::glColor3i) glos_Color3i;
++#define qglColor3i glos_Color3i
++extern decltype(::glColor3iv) glos_Color3iv;
++#define qglColor3iv glos_Color3iv
++extern decltype(::glColor3s) glos_Color3s;
++#define qglColor3s glos_Color3s
++extern decltype(::glColor3sv) glos_Color3sv;
++#define qglColor3sv glos_Color3sv
++extern decltype(::glColor3ub) glos_Color3ub;
++#define qglColor3ub glos_Color3ub
++extern decltype(::glColor3ubv) glos_Color3ubv;
++#define qglColor3ubv glos_Color3ubv
++extern decltype(::glColor3ui) glos_Color3ui;
++#define qglColor3ui glos_Color3ui
++extern decltype(::glColor3uiv) glos_Color3uiv;
++#define qglColor3uiv glos_Color3uiv
++extern decltype(::glColor3us) glos_Color3us;
++#define qglColor3us glos_Color3us
++extern decltype(::glColor3usv) glos_Color3usv;
++#define qglColor3usv glos_Color3usv
++extern decltype(::glColor4b) glos_Color4b;
++#define qglColor4b glos_Color4b
++extern decltype(::glColor4bv) glos_Color4bv;
++#define qglColor4bv glos_Color4bv
++extern decltype(::glColor4d) glos_Color4d;
++#define qglColor4d glos_Color4d
++extern decltype(::glColor4dv) glos_Color4dv;
++#define qglColor4dv glos_Color4dv
++extern decltype(::glColor4f) glos_Color4f;
++#define qglColor4f glos_Color4f
++extern decltype(::glColor4fv) glos_Color4fv;
++#define qglColor4fv glos_Color4fv
++extern decltype(::glColor4i) glos_Color4i;
++#define qglColor4i glos_Color4i
++extern decltype(::glColor4iv) glos_Color4iv;
++#define qglColor4iv glos_Color4iv
++extern decltype(::glColor4s) glos_Color4s;
++#define qglColor4s glos_Color4s
++extern decltype(::glColor4sv) glos_Color4sv;
++#define qglColor4sv glos_Color4sv
++extern decltype(::glColor4ub) glos_Color4ub;
++#define qglColor4ub glos_Color4ub
++extern decltype(::glColor4ubv) glos_Color4ubv;
++#define qglColor4ubv glos_Color4ubv
++extern decltype(::glColor4ui) glos_Color4ui;
++#define qglColor4ui glos_Color4ui
++extern decltype(::glColor4uiv) glos_Color4uiv;
++#define qglColor4uiv glos_Color4uiv
++extern decltype(::glColor4us) glos_Color4us;
++#define qglColor4us glos_Color4us
++extern decltype(::glColor4usv) glos_Color4usv;
++#define qglColor4usv glos_Color4usv
++extern decltype(::glColorMask) glos_ColorMask;
++#define qglColorMask glos_ColorMask
++extern decltype(::glColorMaterial) glos_ColorMaterial;
++#define qglColorMaterial glos_ColorMaterial
++extern decltype(::glColorPointer) glos_ColorPointer;
++#define qglColorPointer glos_ColorPointer
++extern decltype(::glCopyPixels) glos_CopyPixels;
++#define qglCopyPixels glos_CopyPixels
++extern decltype(::glCopyTexImage1D) glos_CopyTexImage1D;
++#define qglCopyTexImage1D glos_CopyTexImage1D
++extern decltype(::glCopyTexImage2D) glos_CopyTexImage2D;
++#define qglCopyTexImage2D glos_CopyTexImage2D
++extern decltype(::glCopyTexSubImage1D) glos_CopyTexSubImage1D;
++#define qglCopyTexSubImage1D glos_CopyTexSubImage1D
++extern decltype(::glCopyTexSubImage2D) glos_CopyTexSubImage2D;
++#define qglCopyTexSubImage2D glos_CopyTexSubImage2D
++extern decltype(::glCullFace) glos_CullFace;
++#define qglCullFace glos_CullFace
++extern decltype(::glDeleteLists) glos_DeleteLists;
++#define qglDeleteLists glos_DeleteLists
++extern decltype(::glDeleteTextures) glos_DeleteTextures;
++#define qglDeleteTextures glos_DeleteTextures
++extern decltype(::glDepthFunc) glos_DepthFunc;
++#define qglDepthFunc glos_DepthFunc
++extern decltype(::glDepthMask) glos_DepthMask;
++#define qglDepthMask glos_DepthMask
++extern decltype(::glDepthRange) glos_DepthRange;
++#define qglDepthRange glos_DepthRange
++extern decltype(::glDisable) glos_Disable;
++#define qglDisable glos_Disable
++extern decltype(::glDisableClientState) glos_DisableClientState;
++#define qglDisableClientState glos_DisableClientState
++extern decltype(::glDrawArrays) glos_DrawArrays;
++#define qglDrawArrays glos_DrawArrays
++extern decltype(::glDrawBuffer) glos_DrawBuffer;
++#define qglDrawBuffer glos_DrawBuffer
++extern decltype(::glDrawElements) glos_DrawElements;
++#define qglDrawElements glos_DrawElements
++extern decltype(::glDrawPixels) glos_DrawPixels;
++#define qglDrawPixels glos_DrawPixels
++extern decltype(::glEdgeFlag) glos_EdgeFlag;
++#define qglEdgeFlag glos_EdgeFlag
++extern decltype(::glEdgeFlagPointer) glos_EdgeFlagPointer;
++#define qglEdgeFlagPointer glos_EdgeFlagPointer
++extern decltype(::glEdgeFlagv) glos_EdgeFlagv;
++#define qglEdgeFlagv glos_EdgeFlagv
++extern decltype(::glEnable) glos_Enable;
++#define qglEnable glos_Enable
++extern decltype(::glEnableClientState) glos_EnableClientState;
++#define qglEnableClientState glos_EnableClientState
++extern decltype(::glEnd) glos_End;
++#define qglEnd glos_End
++extern decltype(::glEndList) glos_EndList;
++#define qglEndList glos_EndList
++extern decltype(::glEvalCoord1d) glos_EvalCoord1d;
++#define qglEvalCoord1d glos_EvalCoord1d
++extern decltype(::glEvalCoord1dv) glos_EvalCoord1dv;
++#define qglEvalCoord1dv glos_EvalCoord1dv
++extern decltype(::glEvalCoord1f) glos_EvalCoord1f;
++#define qglEvalCoord1f glos_EvalCoord1f
++extern decltype(::glEvalCoord1fv) glos_EvalCoord1fv;
++#define qglEvalCoord1fv glos_EvalCoord1fv
++extern decltype(::glEvalCoord2d) glos_EvalCoord2d;
++#define qglEvalCoord2d glos_EvalCoord2d
++extern decltype(::glEvalCoord2dv) glos_EvalCoord2dv;
++#define qglEvalCoord2dv glos_EvalCoord2dv
++extern decltype(::glEvalCoord2f) glos_EvalCoord2f;
++#define qglEvalCoord2f glos_EvalCoord2f
++extern decltype(::glEvalCoord2fv) glos_EvalCoord2fv;
++#define qglEvalCoord2fv glos_EvalCoord2fv
++extern decltype(::glEvalMesh1) glos_EvalMesh1;
++#define qglEvalMesh1 glos_EvalMesh1
++extern decltype(::glEvalMesh2) glos_EvalMesh2;
++#define qglEvalMesh2 glos_EvalMesh2
++extern decltype(::glEvalPoint1) glos_EvalPoint1;
++#define qglEvalPoint1 glos_EvalPoint1
++extern decltype(::glEvalPoint2) glos_EvalPoint2;
++#define qglEvalPoint2 glos_EvalPoint2
++extern decltype(::glFeedbackBuffer) glos_FeedbackBuffer;
++#define qglFeedbackBuffer glos_FeedbackBuffer
++extern decltype(::glFinish) glos_Finish;
++#define qglFinish glos_Finish
++extern decltype(::glFlush) glos_Flush;
++#define qglFlush glos_Flush
++extern decltype(::glFogf) glos_Fogf;
++#define qglFogf glos_Fogf
++extern decltype(::glFogfv) glos_Fogfv;
++#define qglFogfv glos_Fogfv
++extern decltype(::glFogi) glos_Fogi;
++#define qglFogi glos_Fogi
++extern decltype(::glFogiv) glos_Fogiv;
++#define qglFogiv glos_Fogiv
++extern decltype(::glFrontFace) glos_FrontFace;
++#define qglFrontFace glos_FrontFace
++extern decltype(::glFrustum) glos_Frustum;
++#define qglFrustum glos_Frustum
++extern decltype(::glGenLists) glos_GenLists;
++#define qglGenLists glos_GenLists
++extern decltype(::glGenTextures) glos_GenTextures;
++#define qglGenTextures glos_GenTextures
++extern decltype(::glGetBooleanv) glos_GetBooleanv;
++#define qglGetBooleanv glos_GetBooleanv
++extern decltype(::glGetClipPlane) glos_GetClipPlane;
++#define qglGetClipPlane glos_GetClipPlane
++extern decltype(::glGetDoublev) glos_GetDoublev;
++#define qglGetDoublev glos_GetDoublev
++extern decltype(::glGetError) glos_GetError;
++#define qglGetError glos_GetError
++extern decltype(::glGetFloatv) glos_GetFloatv;
++#define qglGetFloatv glos_GetFloatv
++extern decltype(::glGetIntegerv) glos_GetIntegerv;
++#define qglGetIntegerv glos_GetIntegerv
++extern decltype(::glGetLightfv) glos_GetLightfv;
++#define qglGetLightfv glos_GetLightfv
++extern decltype(::glGetLightiv) glos_GetLightiv;
++#define qglGetLightiv glos_GetLightiv
++extern decltype(::glGetMapdv) glos_GetMapdv;
++#define qglGetMapdv glos_GetMapdv
++extern decltype(::glGetMapfv) glos_GetMapfv;
++#define qglGetMapfv glos_GetMapfv
++extern decltype(::glGetMapiv) glos_GetMapiv;
++#define qglGetMapiv glos_GetMapiv
++extern decltype(::glGetMaterialfv) glos_GetMaterialfv;
++#define qglGetMaterialfv glos_GetMaterialfv
++extern decltype(::glGetMaterialiv) glos_GetMaterialiv;
++#define qglGetMaterialiv glos_GetMaterialiv
++extern decltype(::glGetPixelMapfv) glos_GetPixelMapfv;
++#define qglGetPixelMapfv glos_GetPixelMapfv
++extern decltype(::glGetPixelMapuiv) glos_GetPixelMapuiv;
++#define qglGetPixelMapuiv glos_GetPixelMapuiv
++extern decltype(::glGetPixelMapusv) glos_GetPixelMapusv;
++#define qglGetPixelMapusv glos_GetPixelMapusv
++extern decltype(::glGetPointerv) glos_GetPointerv;
++#define qglGetPointerv glos_GetPointerv
++extern decltype(::glGetPolygonStipple) glos_GetPolygonStipple;
++#define qglGetPolygonStipple glos_GetPolygonStipple
++extern decltype(::glGetString) glos_GetString;
++#define qglGetString glos_GetString
++extern decltype(::glGetTexGendv) glos_GetTexGendv;
++#define qglGetTexGendv glos_GetTexGendv
++extern decltype(::glGetTexGenfv) glos_GetTexGenfv;
++#define qglGetTexGenfv glos_GetTexGenfv
++extern decltype(::glGetTexGeniv) glos_GetTexGeniv;
++#define qglGetTexGeniv glos_GetTexGeniv
++extern decltype(::glGetTexImage) glos_GetTexImage;
++#define qglGetTexImage glos_GetTexImage
++extern decltype(::glGetTexLevelParameterfv) glos_GetTexLevelParameterfv;
++#define qglGetTexLevelParameterfv glos_GetTexLevelParameterfv
++extern decltype(::glGetTexLevelParameteriv) glos_GetTexLevelParameteriv;
++#define qglGetTexLevelParameteriv glos_GetTexLevelParameteriv
++extern decltype(::glGetTexParameterfv) glos_GetTexParameterfv;
++#define qglGetTexParameterfv glos_GetTexParameterfv
++extern decltype(::glGetTexParameteriv) glos_GetTexParameteriv;
++#define qglGetTexParameteriv glos_GetTexParameteriv
++extern decltype(::glHint) glos_Hint;
++#define qglHint glos_Hint
++extern decltype(::glIndexMask) glos_IndexMask;
++#define qglIndexMask glos_IndexMask
++extern decltype(::glIndexPointer) glos_IndexPointer;
++#define qglIndexPointer glos_IndexPointer
++extern decltype(::glIndexd) glos_Indexd;
++#define qglIndexd glos_Indexd
++extern decltype(::glIndexdv) glos_Indexdv;
++#define qglIndexdv glos_Indexdv
++extern decltype(::glIndexf) glos_Indexf;
++#define qglIndexf glos_Indexf
++extern decltype(::glIndexfv) glos_Indexfv;
++#define qglIndexfv glos_Indexfv
++extern decltype(::glIndexi) glos_Indexi;
++#define qglIndexi glos_Indexi
++extern decltype(::glIndexiv) glos_Indexiv;
++#define qglIndexiv glos_Indexiv
++extern decltype(::glIndexs) glos_Indexs;
++#define qglIndexs glos_Indexs
++extern decltype(::glIndexsv) glos_Indexsv;
++#define qglIndexsv glos_Indexsv
++extern decltype(::glIndexub) glos_Indexub;
++#define qglIndexub glos_Indexub
++extern decltype(::glIndexubv) glos_Indexubv;
++#define qglIndexubv glos_Indexubv
++extern decltype(::glInitNames) glos_InitNames;
++#define qglInitNames glos_InitNames
++extern decltype(::glInterleavedArrays) glos_InterleavedArrays;
++#define qglInterleavedArrays glos_InterleavedArrays
++extern decltype(::glIsEnabled) glos_IsEnabled;
++#define qglIsEnabled glos_IsEnabled
++extern decltype(::glIsList) glos_IsList;
++#define qglIsList glos_IsList
++extern decltype(::glIsTexture) glos_IsTexture;
++#define qglIsTexture glos_IsTexture
++extern decltype(::glLightModelf) glos_LightModelf;
++#define qglLightModelf glos_LightModelf
++extern decltype(::glLightModelfv) glos_LightModelfv;
++#define qglLightModelfv glos_LightModelfv
++extern decltype(::glLightModeli) glos_LightModeli;
++#define qglLightModeli glos_LightModeli
++extern decltype(::glLightModeliv) glos_LightModeliv;
++#define qglLightModeliv glos_LightModeliv
++extern decltype(::glLightf) glos_Lightf;
++#define qglLightf glos_Lightf
++extern decltype(::glLightfv) glos_Lightfv;
++#define qglLightfv glos_Lightfv
++extern decltype(::glLighti) glos_Lighti;
++#define qglLighti glos_Lighti
++extern decltype(::glLightiv) glos_Lightiv;
++#define qglLightiv glos_Lightiv
++extern decltype(::glLineStipple) glos_LineStipple;
++#define qglLineStipple glos_LineStipple
++extern decltype(::glLineWidth) glos_LineWidth;
++#define qglLineWidth glos_LineWidth
++extern decltype(::glListBase) glos_ListBase;
++#define qglListBase glos_ListBase
++extern decltype(::glLoadIdentity) glos_LoadIdentity;
++#define qglLoadIdentity glos_LoadIdentity
++extern decltype(::glLoadMatrixd) glos_LoadMatrixd;
++#define qglLoadMatrixd glos_LoadMatrixd
++extern decltype(::glLoadMatrixf) glos_LoadMatrixf;
++#define qglLoadMatrixf glos_LoadMatrixf
++extern decltype(::glLoadName) glos_LoadName;
++#define qglLoadName glos_LoadName
++extern decltype(::glLogicOp) glos_LogicOp;
++#define qglLogicOp glos_LogicOp
++extern decltype(::glMap1d) glos_Map1d;
++#define qglMap1d glos_Map1d
++extern decltype(::glMap1f) glos_Map1f;
++#define qglMap1f glos_Map1f
++extern decltype(::glMap2d) glos_Map2d;
++#define qglMap2d glos_Map2d
++extern decltype(::glMap2f) glos_Map2f;
++#define qglMap2f glos_Map2f
++extern decltype(::glMapGrid1d) glos_MapGrid1d;
++#define qglMapGrid1d glos_MapGrid1d
++extern decltype(::glMapGrid1f) glos_MapGrid1f;
++#define qglMapGrid1f glos_MapGrid1f
++extern decltype(::glMapGrid2d) glos_MapGrid2d;
++#define qglMapGrid2d glos_MapGrid2d
++extern decltype(::glMapGrid2f) glos_MapGrid2f;
++#define qglMapGrid2f glos_MapGrid2f
++extern decltype(::glMaterialf) glos_Materialf;
++#define qglMaterialf glos_Materialf
++extern decltype(::glMaterialfv) glos_Materialfv;
++#define qglMaterialfv glos_Materialfv
++extern decltype(::glMateriali) glos_Materiali;
++#define qglMateriali glos_Materiali
++extern decltype(::glMaterialiv) glos_Materialiv;
++#define qglMaterialiv glos_Materialiv
++extern decltype(::glMatrixMode) glos_MatrixMode;
++#define qglMatrixMode glos_MatrixMode
++extern decltype(::glMultMatrixd) glos_MultMatrixd;
++#define qglMultMatrixd glos_MultMatrixd
++extern decltype(::glMultMatrixf) glos_MultMatrixf;
++#define qglMultMatrixf glos_MultMatrixf
++extern decltype(::glNewList) glos_NewList;
++#define qglNewList glos_NewList
++extern decltype(::glNormal3b) glos_Normal3b;
++#define qglNormal3b glos_Normal3b
++extern decltype(::glNormal3bv) glos_Normal3bv;
++#define qglNormal3bv glos_Normal3bv
++extern decltype(::glNormal3d) glos_Normal3d;
++#define qglNormal3d glos_Normal3d
++extern decltype(::glNormal3dv) glos_Normal3dv;
++#define qglNormal3dv glos_Normal3dv
++extern decltype(::glNormal3f) glos_Normal3f;
++#define qglNormal3f glos_Normal3f
++extern decltype(::glNormal3fv) glos_Normal3fv;
++#define qglNormal3fv glos_Normal3fv
++extern decltype(::glNormal3i) glos_Normal3i;
++#define qglNormal3i glos_Normal3i
++extern decltype(::glNormal3iv) glos_Normal3iv;
++#define qglNormal3iv glos_Normal3iv
++extern decltype(::glNormal3s) glos_Normal3s;
++#define qglNormal3s glos_Normal3s
++extern decltype(::glNormal3sv) glos_Normal3sv;
++#define qglNormal3sv glos_Normal3sv
++extern decltype(::glNormalPointer) glos_NormalPointer;
++#define qglNormalPointer glos_NormalPointer
++extern decltype(::glOrtho) glos_Ortho;
++#define qglOrtho glos_Ortho
++extern decltype(::glPassThrough) glos_PassThrough;
++#define qglPassThrough glos_PassThrough
++extern decltype(::glPixelMapfv) glos_PixelMapfv;
++#define qglPixelMapfv glos_PixelMapfv
++extern decltype(::glPixelMapuiv) glos_PixelMapuiv;
++#define qglPixelMapuiv glos_PixelMapuiv
++extern decltype(::glPixelMapusv) glos_PixelMapusv;
++#define qglPixelMapusv glos_PixelMapusv
++extern decltype(::glPixelStoref) glos_PixelStoref;
++#define qglPixelStoref glos_PixelStoref
++extern decltype(::glPixelStorei) glos_PixelStorei;
++#define qglPixelStorei glos_PixelStorei
++extern decltype(::glPixelTransferf) glos_PixelTransferf;
++#define qglPixelTransferf glos_PixelTransferf
++extern decltype(::glPixelTransferi) glos_PixelTransferi;
++#define qglPixelTransferi glos_PixelTransferi
++extern decltype(::glPixelZoom) glos_PixelZoom;
++#define qglPixelZoom glos_PixelZoom
++extern decltype(::glPointSize) glos_PointSize;
++#define qglPointSize glos_PointSize
++extern decltype(::glPolygonMode) glos_PolygonMode;
++#define qglPolygonMode glos_PolygonMode
++extern decltype(::glPolygonOffset) glos_PolygonOffset;
++#define qglPolygonOffset glos_PolygonOffset
++extern decltype(::glPolygonStipple) glos_PolygonStipple;
++#define qglPolygonStipple glos_PolygonStipple
++extern decltype(::glPopAttrib) glos_PopAttrib;
++#define qglPopAttrib glos_PopAttrib
++extern decltype(::glPopClientAttrib) glos_PopClientAttrib;
++#define qglPopClientAttrib glos_PopClientAttrib
++extern decltype(::glPopMatrix) glos_PopMatrix;
++#define qglPopMatrix glos_PopMatrix
++extern decltype(::glPopName) glos_PopName;
++#define qglPopName glos_PopName
++extern decltype(::glPrioritizeTextures) glos_PrioritizeTextures;
++#define qglPrioritizeTextures glos_PrioritizeTextures
++extern decltype(::glPushAttrib) glos_PushAttrib;
++#define qglPushAttrib glos_PushAttrib
++extern decltype(::glPushClientAttrib) glos_PushClientAttrib;
++#define qglPushClientAttrib glos_PushClientAttrib
++extern decltype(::glPushMatrix) glos_PushMatrix;
++#define qglPushMatrix glos_PushMatrix
++extern decltype(::glPushName) glos_PushName;
++#define qglPushName glos_PushName
++extern decltype(::glRasterPos2d) glos_RasterPos2d;
++#define qglRasterPos2d glos_RasterPos2d
++extern decltype(::glRasterPos2dv) glos_RasterPos2dv;
++#define qglRasterPos2dv glos_RasterPos2dv
++extern decltype(::glRasterPos2f) glos_RasterPos2f;
++#define qglRasterPos2f glos_RasterPos2f
++extern decltype(::glRasterPos2fv) glos_RasterPos2fv;
++#define qglRasterPos2fv glos_RasterPos2fv
++extern decltype(::glRasterPos2i) glos_RasterPos2i;
++#define qglRasterPos2i glos_RasterPos2i
++extern decltype(::glRasterPos2iv) glos_RasterPos2iv;
++#define qglRasterPos2iv glos_RasterPos2iv
++extern decltype(::glRasterPos2s) glos_RasterPos2s;
++#define qglRasterPos2s glos_RasterPos2s
++extern decltype(::glRasterPos2sv) glos_RasterPos2sv;
++#define qglRasterPos2sv glos_RasterPos2sv
++extern decltype(::glRasterPos3d) glos_RasterPos3d;
++#define qglRasterPos3d glos_RasterPos3d
++extern decltype(::glRasterPos3dv) glos_RasterPos3dv;
++#define qglRasterPos3dv glos_RasterPos3dv
++extern decltype(::glRasterPos3f) glos_RasterPos3f;
++#define qglRasterPos3f glos_RasterPos3f
++extern decltype(::glRasterPos3fv) glos_RasterPos3fv;
++#define qglRasterPos3fv glos_RasterPos3fv
++extern decltype(::glRasterPos3i) glos_RasterPos3i;
++#define qglRasterPos3i glos_RasterPos3i
++extern decltype(::glRasterPos3iv) glos_RasterPos3iv;
++#define qglRasterPos3iv glos_RasterPos3iv
++extern decltype(::glRasterPos3s) glos_RasterPos3s;
++#define qglRasterPos3s glos_RasterPos3s
++extern decltype(::glRasterPos3sv) glos_RasterPos3sv;
++#define qglRasterPos3sv glos_RasterPos3sv
++extern decltype(::glRasterPos4d) glos_RasterPos4d;
++#define qglRasterPos4d glos_RasterPos4d
++extern decltype(::glRasterPos4dv) glos_RasterPos4dv;
++#define qglRasterPos4dv glos_RasterPos4dv
++extern decltype(::glRasterPos4f) glos_RasterPos4f;
++#define qglRasterPos4f glos_RasterPos4f
++extern decltype(::glRasterPos4fv) glos_RasterPos4fv;
++#define qglRasterPos4fv glos_RasterPos4fv
++extern decltype(::glRasterPos4i) glos_RasterPos4i;
++#define qglRasterPos4i glos_RasterPos4i
++extern decltype(::glRasterPos4iv) glos_RasterPos4iv;
++#define qglRasterPos4iv glos_RasterPos4iv
++extern decltype(::glRasterPos4s) glos_RasterPos4s;
++#define qglRasterPos4s glos_RasterPos4s
++extern decltype(::glRasterPos4sv) glos_RasterPos4sv;
++#define qglRasterPos4sv glos_RasterPos4sv
++extern decltype(::glReadBuffer) glos_ReadBuffer;
++#define qglReadBuffer glos_ReadBuffer
++extern decltype(::glReadPixels) glos_ReadPixels;
++#define qglReadPixels glos_ReadPixels
++extern decltype(::glRectd) glos_Rectd;
++#define qglRectd glos_Rectd
++extern decltype(::glRectdv) glos_Rectdv;
++#define qglRectdv glos_Rectdv
++extern decltype(::glRectf) glos_Rectf;
++#define qglRectf glos_Rectf
++extern decltype(::glRectfv) glos_Rectfv;
++#define qglRectfv glos_Rectfv
++extern decltype(::glRecti) glos_Recti;
++#define qglRecti glos_Recti
++extern decltype(::glRectiv) glos_Rectiv;
++#define qglRectiv glos_Rectiv
++extern decltype(::glRects) glos_Rects;
++#define qglRects glos_Rects
++extern decltype(::glRectsv) glos_Rectsv;
++#define qglRectsv glos_Rectsv
++extern decltype(::glRenderMode) glos_RenderMode;
++#define qglRenderMode glos_RenderMode
++extern decltype(::glRotated) glos_Rotated;
++#define qglRotated glos_Rotated
++extern decltype(::glRotatef) glos_Rotatef;
++#define qglRotatef glos_Rotatef
++extern decltype(::glScaled) glos_Scaled;
++#define qglScaled glos_Scaled
++extern decltype(::glScalef) glos_Scalef;
++#define qglScalef glos_Scalef
++extern decltype(::glScissor) glos_Scissor;
++#define qglScissor glos_Scissor
++extern decltype(::glSelectBuffer) glos_SelectBuffer;
++#define qglSelectBuffer glos_SelectBuffer
++extern decltype(::glShadeModel) glos_ShadeModel;
++#define qglShadeModel glos_ShadeModel
++extern decltype(::glStencilFunc) glos_StencilFunc;
++#define qglStencilFunc glos_StencilFunc
++extern decltype(::glStencilMask) glos_StencilMask;
++#define qglStencilMask glos_StencilMask
++extern decltype(::glStencilOp) glos_StencilOp;
++#define qglStencilOp glos_StencilOp
++extern decltype(::glTexCoord1d) glos_TexCoord1d;
++#define qglTexCoord1d glos_TexCoord1d
++extern decltype(::glTexCoord1dv) glos_TexCoord1dv;
++#define qglTexCoord1dv glos_TexCoord1dv
++extern decltype(::glTexCoord1f) glos_TexCoord1f;
++#define qglTexCoord1f glos_TexCoord1f
++extern decltype(::glTexCoord1fv) glos_TexCoord1fv;
++#define qglTexCoord1fv glos_TexCoord1fv
++extern decltype(::glTexCoord1i) glos_TexCoord1i;
++#define qglTexCoord1i glos_TexCoord1i
++extern decltype(::glTexCoord1iv) glos_TexCoord1iv;
++#define qglTexCoord1iv glos_TexCoord1iv
++extern decltype(::glTexCoord1s) glos_TexCoord1s;
++#define qglTexCoord1s glos_TexCoord1s
++extern decltype(::glTexCoord1sv) glos_TexCoord1sv;
++#define qglTexCoord1sv glos_TexCoord1sv
++extern decltype(::glTexCoord2d) glos_TexCoord2d;
++#define qglTexCoord2d glos_TexCoord2d
++extern decltype(::glTexCoord2dv) glos_TexCoord2dv;
++#define qglTexCoord2dv glos_TexCoord2dv
++extern decltype(::glTexCoord2f) glos_TexCoord2f;
++#define qglTexCoord2f glos_TexCoord2f
++extern decltype(::glTexCoord2fv) glos_TexCoord2fv;
++#define qglTexCoord2fv glos_TexCoord2fv
++extern decltype(::glTexCoord2i) glos_TexCoord2i;
++#define qglTexCoord2i glos_TexCoord2i
++extern decltype(::glTexCoord2iv) glos_TexCoord2iv;
++#define qglTexCoord2iv glos_TexCoord2iv
++extern decltype(::glTexCoord2s) glos_TexCoord2s;
++#define qglTexCoord2s glos_TexCoord2s
++extern decltype(::glTexCoord2sv) glos_TexCoord2sv;
++#define qglTexCoord2sv glos_TexCoord2sv
++extern decltype(::glTexCoord3d) glos_TexCoord3d;
++#define qglTexCoord3d glos_TexCoord3d
++extern decltype(::glTexCoord3dv) glos_TexCoord3dv;
++#define qglTexCoord3dv glos_TexCoord3dv
++extern decltype(::glTexCoord3f) glos_TexCoord3f;
++#define qglTexCoord3f glos_TexCoord3f
++extern decltype(::glTexCoord3fv) glos_TexCoord3fv;
++#define qglTexCoord3fv glos_TexCoord3fv
++extern decltype(::glTexCoord3i) glos_TexCoord3i;
++#define qglTexCoord3i glos_TexCoord3i
++extern decltype(::glTexCoord3iv) glos_TexCoord3iv;
++#define qglTexCoord3iv glos_TexCoord3iv
++extern decltype(::glTexCoord3s) glos_TexCoord3s;
++#define qglTexCoord3s glos_TexCoord3s
++extern decltype(::glTexCoord3sv) glos_TexCoord3sv;
++#define qglTexCoord3sv glos_TexCoord3sv
++extern decltype(::glTexCoord4d) glos_TexCoord4d;
++#define qglTexCoord4d glos_TexCoord4d
++extern decltype(::glTexCoord4dv) glos_TexCoord4dv;
++#define qglTexCoord4dv glos_TexCoord4dv
++extern decltype(::glTexCoord4f) glos_TexCoord4f;
++#define qglTexCoord4f glos_TexCoord4f
++extern decltype(::glTexCoord4fv) glos_TexCoord4fv;
++#define qglTexCoord4fv glos_TexCoord4fv
++extern decltype(::glTexCoord4i) glos_TexCoord4i;
++#define qglTexCoord4i glos_TexCoord4i
++extern decltype(::glTexCoord4iv) glos_TexCoord4iv;
++#define qglTexCoord4iv glos_TexCoord4iv
++extern decltype(::glTexCoord4s) glos_TexCoord4s;
++#define qglTexCoord4s glos_TexCoord4s
++extern decltype(::glTexCoord4sv) glos_TexCoord4sv;
++#define qglTexCoord4sv glos_TexCoord4sv
++extern decltype(::glTexCoordPointer) glos_TexCoordPointer;
++#define qglTexCoordPointer glos_TexCoordPointer
++extern decltype(::glTexEnvf) glos_TexEnvf;
++#define qglTexEnvf glos_TexEnvf
++extern decltype(::glTexEnvfv) glos_TexEnvfv;
++#define qglTexEnvfv glos_TexEnvfv
++extern decltype(::glTexEnvi) glos_TexEnvi;
++#define qglTexEnvi glos_TexEnvi
++extern decltype(::glTexEnviv) glos_TexEnviv;
++#define qglTexEnviv glos_TexEnviv
++extern decltype(::glTexGend) glos_TexGend;
++#define qglTexGend glos_TexGend
++extern decltype(::glTexGendv) glos_TexGendv;
++#define qglTexGendv glos_TexGendv
++extern decltype(::glTexGenf) glos_TexGenf;
++#define qglTexGenf glos_TexGenf
++extern decltype(::glTexGenfv) glos_TexGenfv;
++#define qglTexGenfv glos_TexGenfv
++extern decltype(::glTexGeni) glos_TexGeni;
++#define qglTexGeni glos_TexGeni
++extern decltype(::glTexGeniv) glos_TexGeniv;
++#define qglTexGeniv glos_TexGeniv
++extern decltype(::glTexImage1D) glos_TexImage1D;
++#define qglTexImage1D glos_TexImage1D
++extern decltype(::glTexImage2D) glos_TexImage2D;
++#define qglTexImage2D glos_TexImage2D
++extern decltype(::glTexParameterf) glos_TexParameterf;
++#define qglTexParameterf glos_TexParameterf
++extern decltype(::glTexParameterfv) glos_TexParameterfv;
++#define qglTexParameterfv glos_TexParameterfv
++extern decltype(::glTexParameteri) glos_TexParameteri;
++#define qglTexParameteri glos_TexParameteri
++extern decltype(::glTexParameteriv) glos_TexParameteriv;
++#define qglTexParameteriv glos_TexParameteriv
++extern decltype(::glTexSubImage1D) glos_TexSubImage1D;
++#define qglTexSubImage1D glos_TexSubImage1D
++extern decltype(::glTexSubImage2D) glos_TexSubImage2D;
++#define qglTexSubImage2D glos_TexSubImage2D
++extern decltype(::glTranslated) glos_Translated;
++#define qglTranslated glos_Translated
++extern decltype(::glTranslatef) glos_Translatef;
++#define qglTranslatef glos_Translatef
++extern decltype(::glVertex2d) glos_Vertex2d;
++#define qglVertex2d glos_Vertex2d
++extern decltype(::glVertex2dv) glos_Vertex2dv;
++#define qglVertex2dv glos_Vertex2dv
++extern decltype(::glVertex2f) glos_Vertex2f;
++#define qglVertex2f glos_Vertex2f
++extern decltype(::glVertex2fv) glos_Vertex2fv;
++#define qglVertex2fv glos_Vertex2fv
++extern decltype(::glVertex2i) glos_Vertex2i;
++#define qglVertex2i glos_Vertex2i
++extern decltype(::glVertex2iv) glos_Vertex2iv;
++#define qglVertex2iv glos_Vertex2iv
++extern decltype(::glVertex2s) glos_Vertex2s;
++#define qglVertex2s glos_Vertex2s
++extern decltype(::glVertex2sv) glos_Vertex2sv;
++#define qglVertex2sv glos_Vertex2sv
++extern decltype(::glVertex3d) glos_Vertex3d;
++#define qglVertex3d glos_Vertex3d
++extern decltype(::glVertex3dv) glos_Vertex3dv;
++#define qglVertex3dv glos_Vertex3dv
++extern decltype(::glVertex3f) glos_Vertex3f;
++#define qglVertex3f glos_Vertex3f
++extern decltype(::glVertex3fv) glos_Vertex3fv;
++#define qglVertex3fv glos_Vertex3fv
++extern decltype(::glVertex3i) glos_Vertex3i;
++#define qglVertex3i glos_Vertex3i
++extern decltype(::glVertex3iv) glos_Vertex3iv;
++#define qglVertex3iv glos_Vertex3iv
++extern decltype(::glVertex3s) glos_Vertex3s;
++#define qglVertex3s glos_Vertex3s
++extern decltype(::glVertex3sv) glos_Vertex3sv;
++#define qglVertex3sv glos_Vertex3sv
++extern decltype(::glVertex4d) glos_Vertex4d;
++#define qglVertex4d glos_Vertex4d
++extern decltype(::glVertex4dv) glos_Vertex4dv;
++#define qglVertex4dv glos_Vertex4dv
++extern decltype(::glVertex4f) glos_Vertex4f;
++#define qglVertex4f glos_Vertex4f
++extern decltype(::glVertex4fv) glos_Vertex4fv;
++#define qglVertex4fv glos_Vertex4fv
++extern decltype(::glVertex4i) glos_Vertex4i;
++#define qglVertex4i glos_Vertex4i
++extern decltype(::glVertex4iv) glos_Vertex4iv;
++#define qglVertex4iv glos_Vertex4iv
++extern decltype(::glVertex4s) glos_Vertex4s;
++#define qglVertex4s glos_Vertex4s
++extern decltype(::glVertex4sv) glos_Vertex4sv;
++#define qglVertex4sv glos_Vertex4sv
++extern decltype(::glVertexPointer) glos_VertexPointer;
++#define qglVertexPointer glos_VertexPointer
++extern decltype(::glViewport) glos_Viewport;
++#define qglViewport glos_Viewport
++
++void *glos_GetProcAddress( const char *name );
++bool glos_ExtensionSupported( const char *name );
++void glos_Init( void );
+diff --git a/code/rd-vanilla/tr_init.cpp b/code/rd-vanilla/tr_init.cpp
+index 13c72e6..44abe54 100644
+--- a/code/rd-vanilla/tr_init.cpp
++++ b/code/rd-vanilla/tr_init.cpp
+@@ -32,6 +32,15 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
+ #include "../rd-common/tr_font.h"
+ #include "tr_WorldEffects.h"
+ 
++#ifdef GLOS_GLES1
++// The GLES 1.1 layer answers extension queries and hands out its own entry points.
++#define RI_GL_ExtensionSupported glos_ExtensionSupported
++#define RI_GL_GetProcAddress glos_GetProcAddress
++#else
++#define RI_GL_ExtensionSupported ri.GL_ExtensionSupported
++#define RI_GL_GetProcAddress ri.GL_GetProcAddress
++#endif
++
+ glconfig_t	glConfig;
+ glstate_t	glState;
+ window_t	window;
+@@ -285,8 +294,8 @@ static void GLW_InitTextureCompression( void )
+ {
+ 	bool newer_tc, old_tc;
+ 	// Check for available tc methods.
+-	newer_tc = ri.GL_ExtensionSupported("GL_ARB_texture_compression") && ri.GL_ExtensionSupported("GL_EXT_texture_compression_s3tc");
+-	old_tc = ri.GL_ExtensionSupported("GL_S3_s3tc");
++	newer_tc = RI_GL_ExtensionSupported("GL_ARB_texture_compression") && RI_GL_ExtensionSupported("GL_EXT_texture_compression_s3tc");
++	old_tc = RI_GL_ExtensionSupported("GL_S3_s3tc");
+ 
+ 	if ( old_tc )
+ 	{
+@@ -410,7 +419,7 @@ static void GLimp_InitExtensions( void )
+ 
+ 	// GL_EXT_texture_env_add
+ 	glConfig.textureEnvAddAvailable = qfalse;
+-	if ( ri.GL_ExtensionSupported( "GL_EXT_texture_env_add" ) )
++	if ( RI_GL_ExtensionSupported( "GL_EXT_texture_env_add" ) )
+ 	{
+ 		if ( r_ext_texture_env_add->integer )
+ 		{
+@@ -430,7 +439,7 @@ static void GLimp_InitExtensions( void )
+ 
+ 	// GL_EXT_texture_filter_anisotropic
+ 	glConfig.maxTextureFilterAnisotropy = 0;
+-	if ( ri.GL_ExtensionSupported( "GL_EXT_texture_filter_anisotropic" ) )
++	if ( RI_GL_ExtensionSupported( "GL_EXT_texture_filter_anisotropic" ) )
+ 	{
+ 		qglGetFloatv( GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT, &glConfig.maxTextureFilterAnisotropy );
+ 		Com_Printf ("...GL_EXT_texture_filter_anisotropic available\n" );
+@@ -463,13 +472,13 @@ static void GLimp_InitExtensions( void )
+ 	qglMultiTexCoord2fARB = NULL;
+ 	qglActiveTextureARB = NULL;
+ 	qglClientActiveTextureARB = NULL;
+-	if ( ri.GL_ExtensionSupported( "GL_ARB_multitexture" ) )
++	if ( RI_GL_ExtensionSupported( "GL_ARB_multitexture" ) )
+ 	{
+ 		if ( r_ext_multitexture->integer )
+ 		{
+-			qglMultiTexCoord2fARB = ( PFNGLMULTITEXCOORD2FARBPROC ) ri.GL_GetProcAddress( "glMultiTexCoord2fARB" );
+-			qglActiveTextureARB = ( PFNGLACTIVETEXTUREARBPROC ) ri.GL_GetProcAddress( "glActiveTextureARB" );
+-			qglClientActiveTextureARB = ( PFNGLCLIENTACTIVETEXTUREARBPROC ) ri.GL_GetProcAddress( "glClientActiveTextureARB" );
++			qglMultiTexCoord2fARB = ( PFNGLMULTITEXCOORD2FARBPROC ) RI_GL_GetProcAddress( "glMultiTexCoord2fARB" );
++			qglActiveTextureARB = ( PFNGLACTIVETEXTUREARBPROC ) RI_GL_GetProcAddress( "glActiveTextureARB" );
++			qglClientActiveTextureARB = ( PFNGLCLIENTACTIVETEXTUREARBPROC ) RI_GL_GetProcAddress( "glClientActiveTextureARB" );
+ 
+ 			if ( qglActiveTextureARB )
+ 			{
+@@ -501,13 +510,13 @@ static void GLimp_InitExtensions( void )
+ 	// GL_EXT_compiled_vertex_array
+ 	qglLockArraysEXT = NULL;
+ 	qglUnlockArraysEXT = NULL;
+-	if ( ri.GL_ExtensionSupported( "GL_EXT_compiled_vertex_array" ) )
++	if ( RI_GL_ExtensionSupported( "GL_EXT_compiled_vertex_array" ) )
+ 	{
+ 		if ( r_ext_compiled_vertex_array->integer )
+ 		{
+ 			Com_Printf ("...using GL_EXT_compiled_vertex_array\n" );
+-			qglLockArraysEXT = ( PFNGLLOCKARRAYSEXTPROC ) ri.GL_GetProcAddress( "glLockArraysEXT" );
+-			qglUnlockArraysEXT = ( PFNGLUNLOCKARRAYSEXTPROC ) ri.GL_GetProcAddress( "glUnlockArraysEXT" );
++			qglLockArraysEXT = ( PFNGLLOCKARRAYSEXTPROC ) RI_GL_GetProcAddress( "glLockArraysEXT" );
++			qglUnlockArraysEXT = ( PFNGLUNLOCKARRAYSEXTPROC ) RI_GL_GetProcAddress( "glUnlockArraysEXT" );
+ 			if (!qglLockArraysEXT || !qglUnlockArraysEXT) {
+ 				Com_Error (ERR_FATAL, "bad getprocaddress");
+ 			}
+@@ -524,7 +533,7 @@ static void GLimp_InitExtensions( void )
+ 
+ 	bool bNVRegisterCombiners = false;
+ 	// Register Combiners.
+-	if ( ri.GL_ExtensionSupported( "GL_NV_register_combiners" ) )
++	if ( RI_GL_ExtensionSupported( "GL_NV_register_combiners" ) )
+ 	{
+ 		// NOTE: This extension requires multitexture support (over 2 units).
+ 		if ( glConfig.maxActiveTextures >= 2 )
+@@ -534,19 +543,19 @@ static void GLimp_InitExtensions( void )
+ 			// NOTE: VV guys will _definetly_ not be able to use regcoms. Pixel Shaders are just as good though :-)
+ 			// NOTE: Also, this is an nVidia specific extension (of course), so fragment shaders would serve the same purpose
+ 			// if we needed some kind of fragment/pixel manipulation support.
+-			qglCombinerParameterfvNV = (PFNGLCOMBINERPARAMETERFVNVPROC)ri.GL_GetProcAddress( "glCombinerParameterfvNV" );
+-			qglCombinerParameterivNV = (PFNGLCOMBINERPARAMETERIVNVPROC)ri.GL_GetProcAddress( "glCombinerParameterivNV" );
+-			qglCombinerParameterfNV = (PFNGLCOMBINERPARAMETERFNVPROC)ri.GL_GetProcAddress( "glCombinerParameterfNV" );
+-			qglCombinerParameteriNV = (PFNGLCOMBINERPARAMETERINVPROC)ri.GL_GetProcAddress( "glCombinerParameteriNV" );
+-			qglCombinerInputNV = (PFNGLCOMBINERINPUTNVPROC)ri.GL_GetProcAddress( "glCombinerInputNV" );
+-			qglCombinerOutputNV = (PFNGLCOMBINEROUTPUTNVPROC)ri.GL_GetProcAddress( "glCombinerOutputNV" );
+-			qglFinalCombinerInputNV = (PFNGLFINALCOMBINERINPUTNVPROC)ri.GL_GetProcAddress( "glFinalCombinerInputNV" );
+-			qglGetCombinerInputParameterfvNV	= (PFNGLGETCOMBINERINPUTPARAMETERFVNVPROC)ri.GL_GetProcAddress( "glGetCombinerInputParameterfvNV" );
+-			qglGetCombinerInputParameterivNV	= (PFNGLGETCOMBINERINPUTPARAMETERIVNVPROC)ri.GL_GetProcAddress( "glGetCombinerInputParameterivNV" );
+-			qglGetCombinerOutputParameterfvNV = (PFNGLGETCOMBINEROUTPUTPARAMETERFVNVPROC)ri.GL_GetProcAddress( "glGetCombinerOutputParameterfvNV" );
+-			qglGetCombinerOutputParameterivNV = (PFNGLGETCOMBINEROUTPUTPARAMETERIVNVPROC)ri.GL_GetProcAddress( "glGetCombinerOutputParameterivNV" );
+-			qglGetFinalCombinerInputParameterfvNV = (PFNGLGETFINALCOMBINERINPUTPARAMETERFVNVPROC)ri.GL_GetProcAddress( "glGetFinalCombinerInputParameterfvNV" );
+-			qglGetFinalCombinerInputParameterivNV = (PFNGLGETFINALCOMBINERINPUTPARAMETERIVNVPROC)ri.GL_GetProcAddress( "glGetFinalCombinerInputParameterivNV" );
++			qglCombinerParameterfvNV = (PFNGLCOMBINERPARAMETERFVNVPROC)RI_GL_GetProcAddress( "glCombinerParameterfvNV" );
++			qglCombinerParameterivNV = (PFNGLCOMBINERPARAMETERIVNVPROC)RI_GL_GetProcAddress( "glCombinerParameterivNV" );
++			qglCombinerParameterfNV = (PFNGLCOMBINERPARAMETERFNVPROC)RI_GL_GetProcAddress( "glCombinerParameterfNV" );
++			qglCombinerParameteriNV = (PFNGLCOMBINERPARAMETERINVPROC)RI_GL_GetProcAddress( "glCombinerParameteriNV" );
++			qglCombinerInputNV = (PFNGLCOMBINERINPUTNVPROC)RI_GL_GetProcAddress( "glCombinerInputNV" );
++			qglCombinerOutputNV = (PFNGLCOMBINEROUTPUTNVPROC)RI_GL_GetProcAddress( "glCombinerOutputNV" );
++			qglFinalCombinerInputNV = (PFNGLFINALCOMBINERINPUTNVPROC)RI_GL_GetProcAddress( "glFinalCombinerInputNV" );
++			qglGetCombinerInputParameterfvNV	= (PFNGLGETCOMBINERINPUTPARAMETERFVNVPROC)RI_GL_GetProcAddress( "glGetCombinerInputParameterfvNV" );
++			qglGetCombinerInputParameterivNV	= (PFNGLGETCOMBINERINPUTPARAMETERIVNVPROC)RI_GL_GetProcAddress( "glGetCombinerInputParameterivNV" );
++			qglGetCombinerOutputParameterfvNV = (PFNGLGETCOMBINEROUTPUTPARAMETERFVNVPROC)RI_GL_GetProcAddress( "glGetCombinerOutputParameterfvNV" );
++			qglGetCombinerOutputParameterivNV = (PFNGLGETCOMBINEROUTPUTPARAMETERIVNVPROC)RI_GL_GetProcAddress( "glGetCombinerOutputParameterivNV" );
++			qglGetFinalCombinerInputParameterfvNV = (PFNGLGETFINALCOMBINERINPUTPARAMETERFVNVPROC)RI_GL_GetProcAddress( "glGetFinalCombinerInputParameterfvNV" );
++			qglGetFinalCombinerInputParameterivNV = (PFNGLGETFINALCOMBINERINPUTPARAMETERIVNVPROC)RI_GL_GetProcAddress( "glGetFinalCombinerInputParameterivNV" );
+ 
+ 			// Validate the functions we need.
+ 			if ( !qglCombinerParameterfvNV || !qglCombinerParameterivNV || !qglCombinerParameterfNV || !qglCombinerParameteriNV || !qglCombinerInputNV ||
+@@ -577,7 +586,7 @@ static void GLimp_InitExtensions( void )
+ 
+ 	// Vertex Programs.
+ 	bool bARBVertexProgram = false;
+-	if ( ri.GL_ExtensionSupported( "GL_ARB_vertex_program" ) )
++	if ( RI_GL_ExtensionSupported( "GL_ARB_vertex_program" ) )
+ 	{
+ 		bARBVertexProgram = true;
+ 	}
+@@ -589,7 +598,7 @@ static void GLimp_InitExtensions( void )
+ 
+ 	// Fragment Programs.
+ 	bool bARBFragmentProgram = false;
+-	if ( ri.GL_ExtensionSupported( "GL_ARB_fragment_program" ) )
++	if ( RI_GL_ExtensionSupported( "GL_ARB_fragment_program" ) )
+ 	{
+ 		bARBFragmentProgram = true;
+ 	}
+@@ -602,25 +611,25 @@ static void GLimp_InitExtensions( void )
+ 	// If we support one or the other, load the shared function pointers.
+ 	if ( bARBVertexProgram || bARBFragmentProgram )
+ 	{
+-		qglProgramStringARB					= (PFNGLPROGRAMSTRINGARBPROC)  ri.GL_GetProcAddress("glProgramStringARB");
+-		qglBindProgramARB					= (PFNGLBINDPROGRAMARBPROC)    ri.GL_GetProcAddress("glBindProgramARB");
+-		qglDeleteProgramsARB				= (PFNGLDELETEPROGRAMSARBPROC) ri.GL_GetProcAddress("glDeleteProgramsARB");
+-		qglGenProgramsARB					= (PFNGLGENPROGRAMSARBPROC)    ri.GL_GetProcAddress("glGenProgramsARB");
+-		qglProgramEnvParameter4dARB			= (PFNGLPROGRAMENVPARAMETER4DARBPROC)    ri.GL_GetProcAddress("glProgramEnvParameter4dARB");
+-		qglProgramEnvParameter4dvARB		= (PFNGLPROGRAMENVPARAMETER4DVARBPROC)   ri.GL_GetProcAddress("glProgramEnvParameter4dvARB");
+-		qglProgramEnvParameter4fARB			= (PFNGLPROGRAMENVPARAMETER4FARBPROC)    ri.GL_GetProcAddress("glProgramEnvParameter4fARB");
+-		qglProgramEnvParameter4fvARB		= (PFNGLPROGRAMENVPARAMETER4FVARBPROC)   ri.GL_GetProcAddress("glProgramEnvParameter4fvARB");
+-		qglProgramLocalParameter4dARB		= (PFNGLPROGRAMLOCALPARAMETER4DARBPROC)  ri.GL_GetProcAddress("glProgramLocalParameter4dARB");
+-		qglProgramLocalParameter4dvARB		= (PFNGLPROGRAMLOCALPARAMETER4DVARBPROC) ri.GL_GetProcAddress("glProgramLocalParameter4dvARB");
+-		qglProgramLocalParameter4fARB		= (PFNGLPROGRAMLOCALPARAMETER4FARBPROC)  ri.GL_GetProcAddress("glProgramLocalParameter4fARB");
+-		qglProgramLocalParameter4fvARB		= (PFNGLPROGRAMLOCALPARAMETER4FVARBPROC) ri.GL_GetProcAddress("glProgramLocalParameter4fvARB");
+-		qglGetProgramEnvParameterdvARB		= (PFNGLGETPROGRAMENVPARAMETERDVARBPROC) ri.GL_GetProcAddress("glGetProgramEnvParameterdvARB");
+-		qglGetProgramEnvParameterfvARB		= (PFNGLGETPROGRAMENVPARAMETERFVARBPROC) ri.GL_GetProcAddress("glGetProgramEnvParameterfvARB");
+-		qglGetProgramLocalParameterdvARB	= (PFNGLGETPROGRAMLOCALPARAMETERDVARBPROC) ri.GL_GetProcAddress("glGetProgramLocalParameterdvARB");
+-		qglGetProgramLocalParameterfvARB	= (PFNGLGETPROGRAMLOCALPARAMETERFVARBPROC) ri.GL_GetProcAddress("glGetProgramLocalParameterfvARB");
+-		qglGetProgramivARB					= (PFNGLGETPROGRAMIVARBPROC)     ri.GL_GetProcAddress("glGetProgramivARB");
+-		qglGetProgramStringARB				= (PFNGLGETPROGRAMSTRINGARBPROC) ri.GL_GetProcAddress("glGetProgramStringARB");
+-		qglIsProgramARB						= (PFNGLISPROGRAMARBPROC)        ri.GL_GetProcAddress("glIsProgramARB");
++		qglProgramStringARB					= (PFNGLPROGRAMSTRINGARBPROC)  RI_GL_GetProcAddress("glProgramStringARB");
++		qglBindProgramARB					= (PFNGLBINDPROGRAMARBPROC)    RI_GL_GetProcAddress("glBindProgramARB");
++		qglDeleteProgramsARB				= (PFNGLDELETEPROGRAMSARBPROC) RI_GL_GetProcAddress("glDeleteProgramsARB");
++		qglGenProgramsARB					= (PFNGLGENPROGRAMSARBPROC)    RI_GL_GetProcAddress("glGenProgramsARB");
++		qglProgramEnvParameter4dARB			= (PFNGLPROGRAMENVPARAMETER4DARBPROC)    RI_GL_GetProcAddress("glProgramEnvParameter4dARB");
++		qglProgramEnvParameter4dvARB		= (PFNGLPROGRAMENVPARAMETER4DVARBPROC)   RI_GL_GetProcAddress("glProgramEnvParameter4dvARB");
++		qglProgramEnvParameter4fARB			= (PFNGLPROGRAMENVPARAMETER4FARBPROC)    RI_GL_GetProcAddress("glProgramEnvParameter4fARB");
++		qglProgramEnvParameter4fvARB		= (PFNGLPROGRAMENVPARAMETER4FVARBPROC)   RI_GL_GetProcAddress("glProgramEnvParameter4fvARB");
++		qglProgramLocalParameter4dARB		= (PFNGLPROGRAMLOCALPARAMETER4DARBPROC)  RI_GL_GetProcAddress("glProgramLocalParameter4dARB");
++		qglProgramLocalParameter4dvARB		= (PFNGLPROGRAMLOCALPARAMETER4DVARBPROC) RI_GL_GetProcAddress("glProgramLocalParameter4dvARB");
++		qglProgramLocalParameter4fARB		= (PFNGLPROGRAMLOCALPARAMETER4FARBPROC)  RI_GL_GetProcAddress("glProgramLocalParameter4fARB");
++		qglProgramLocalParameter4fvARB		= (PFNGLPROGRAMLOCALPARAMETER4FVARBPROC) RI_GL_GetProcAddress("glProgramLocalParameter4fvARB");
++		qglGetProgramEnvParameterdvARB		= (PFNGLGETPROGRAMENVPARAMETERDVARBPROC) RI_GL_GetProcAddress("glGetProgramEnvParameterdvARB");
++		qglGetProgramEnvParameterfvARB		= (PFNGLGETPROGRAMENVPARAMETERFVARBPROC) RI_GL_GetProcAddress("glGetProgramEnvParameterfvARB");
++		qglGetProgramLocalParameterdvARB	= (PFNGLGETPROGRAMLOCALPARAMETERDVARBPROC) RI_GL_GetProcAddress("glGetProgramLocalParameterdvARB");
++		qglGetProgramLocalParameterfvARB	= (PFNGLGETPROGRAMLOCALPARAMETERFVARBPROC) RI_GL_GetProcAddress("glGetProgramLocalParameterfvARB");
++		qglGetProgramivARB					= (PFNGLGETPROGRAMIVARBPROC)     RI_GL_GetProcAddress("glGetProgramivARB");
++		qglGetProgramStringARB				= (PFNGLGETPROGRAMSTRINGARBPROC) RI_GL_GetProcAddress("glGetProgramStringARB");
++		qglIsProgramARB						= (PFNGLISPROGRAMARBPROC)        RI_GL_GetProcAddress("glIsProgramARB");
+ 
+ 		// Validate the functions we need.
+ 		if ( !qglProgramStringARB || !qglBindProgramARB || !qglDeleteProgramsARB || !qglGenProgramsARB ||
+@@ -648,7 +657,7 @@ static void GLimp_InitExtensions( void )
+ 		g_bTextureRectangleHack = true;
+ 	}
+ 
+-	if ( ri.GL_ExtensionSupported( "GL_NV_texture_rectangle" ) || ri.GL_ExtensionSupported( "GL_EXT_texture_rectangle" ) )
++	if ( RI_GL_ExtensionSupported( "GL_NV_texture_rectangle" ) || RI_GL_ExtensionSupported( "GL_EXT_texture_rectangle" ) )
+ 	{
+ 		bTexRectSupported = true;
+ 	}
+@@ -674,7 +683,7 @@ static void GLimp_InitExtensions( void )
+ 	}
+ 
+ #if !defined(__APPLE__)
+-	qglStencilOpSeparate = (PFNGLSTENCILOPSEPARATEPROC)ri.GL_GetProcAddress("glStencilOpSeparate");
++	qglStencilOpSeparate = (PFNGLSTENCILOPSEPARATEPROC)RI_GL_GetProcAddress("glStencilOpSeparate");
+ 	if (qglStencilOpSeparate)
+ 	{
+ 		glConfig.doStencilShadowsInOneDrawcall = qtrue;
+@@ -711,6 +720,9 @@ static void InitOpenGL( void )
+ 		memset(&glConfig, 0, sizeof(glConfig));
+ 
+ 		window = ri.WIN_Init(&windowDesc, &glConfig);
++#ifdef GLOS_GLES1
++		glos_Init();
++#endif
+ 
+ 		// get our config strings
+ 		glConfig.vendor_string = (const char *)qglGetString (GL_VENDOR);
+diff --git a/code/rd-vanilla/tr_local.h b/code/rd-vanilla/tr_local.h
+index c9e745a..73e7a58 100644
+--- a/code/rd-vanilla/tr_local.h
++++ b/code/rd-vanilla/tr_local.h
+@@ -31,8 +31,14 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
+ #include "mdx_format.h"
+ #include "qgl.h"
+ 
++#ifdef GLOS_GLES1
++// GLES 1.1 on the Mali-400 has no 32-bit indices; a tess batch stays far below 65536 vertexes.
++#define GL_INDEX_TYPE		GL_UNSIGNED_SHORT
++typedef unsigned short glIndex_t;
++#else
+ #define GL_INDEX_TYPE		GL_UNSIGNED_INT
+ typedef unsigned int glIndex_t;
++#endif
+ 
+ extern refimport_t ri;
+ 
+diff --git a/code/rd-vanilla/tr_shade.cpp b/code/rd-vanilla/tr_shade.cpp
+index 48f3ed1..0c8be26 100644
+--- a/code/rd-vanilla/tr_shade.cpp
++++ b/code/rd-vanilla/tr_shade.cpp
+@@ -177,11 +177,15 @@ static void R_DrawElements( int numIndexes, const glIndex_t *indexes ) {
+ 
+ 	// default is to use triangles if compiled vertex arrays are present
+ 	if ( primitives == 0 ) {
++#ifdef GLOS_GLES1
++		primitives = 2;	// one glDrawElements; the strip path goes through emulated immediate mode
++#else
+ 		if ( qglLockArraysEXT ) {
+ 			primitives = 2;
+ 		} else {
+ 			primitives = 1;
+ 		}
++#endif
+ 	}
+ 
+ 
+diff --git a/shared/sdl/sdl_glos.cpp b/shared/sdl/sdl_glos.cpp
+new file mode 100644
+index 0000000..d984d11
+--- /dev/null
++++ b/shared/sdl/sdl_glos.cpp
+@@ -0,0 +1,250 @@
++/*
++sdl_glos.cpp: the GL window for ARM's closed Mali-400 driver (r6p2 "fbdev"
++libMali.so) on goodluckOS: a GLES 1.1 context on EGL drawing to /dev/fb0.
++ARM's driver has no GBM/KMS, so SDL keeps only input and sound here (its
++video runs on the "dummy" driver); see the port's glos-gpu for the driver switch.
++EGL is loaded at runtime, so the binary doesn't depend on it.
++*/
++#ifdef GLOS_GLES1
++
++#include <dlfcn.h>
++#include <errno.h>
++#include <fcntl.h>
++#include <linux/fb.h>
++#include <pthread.h>
++#include <stdarg.h>
++#include <stdlib.h>
++#include <sys/ioctl.h>
++#include <time.h>
++#include <unistd.h>
++
++#include "qcommon/qcommon.h"
++#include "sdl_glos.h"
++
++typedef void *EGLDisplay, *EGLConfig, *EGLSurface, *EGLContext;
++typedef int EGLint;
++typedef unsigned int EGLBoolean;
++
++// ARM's fbdev native window type (EGL/fbdev_window.h).
++struct fbdev_window {
++	unsigned short width;
++	unsigned short height;
++};
++
++#define EGL_DEFAULT_DISPLAY ((void*)0)
++#define EGL_NO_CONTEXT ((EGLContext)0)
++#define EGL_NONE 0x3038
++#define EGL_RED_SIZE 0x3024
++#define EGL_GREEN_SIZE 0x3023
++#define EGL_BLUE_SIZE 0x3022
++#define EGL_DEPTH_SIZE 0x3025
++#define EGL_STENCIL_SIZE 0x3026
++#define EGL_SURFACE_TYPE 0x3033
++#define EGL_WINDOW_BIT 0x0004
++#define EGL_RENDERABLE_TYPE 0x3040
++#define EGL_OPENGL_ES_BIT 0x0001
++#define EGL_CONTEXT_CLIENT_VERSION 0x3098
++
++static struct {
++	EGLDisplay (*GetDisplay)(void *);
++	EGLBoolean (*Initialize)(EGLDisplay, EGLint *, EGLint *);
++	EGLBoolean (*ChooseConfig)(EGLDisplay, const EGLint *, EGLConfig *, EGLint, EGLint *);
++	EGLSurface (*CreateWindowSurface)(EGLDisplay, EGLConfig, void *, const EGLint *);
++	EGLContext (*CreateContext)(EGLDisplay, EGLConfig, EGLContext, const EGLint *);
++	EGLBoolean (*MakeCurrent)(EGLDisplay, EGLSurface, EGLSurface, EGLContext);
++	EGLBoolean (*SwapBuffers)(EGLDisplay, EGLSurface);
++	EGLBoolean (*SwapInterval)(EGLDisplay, EGLint);
++	EGLBoolean (*DestroySurface)(EGLDisplay, EGLSurface);
++	EGLBoolean (*DestroyContext)(EGLDisplay, EGLContext);
++	EGLBoolean (*Terminate)(EGLDisplay);
++	EGLint (*GetError)(void);
++} egl;
++
++static void *maliLib;
++static EGLDisplay display;
++static EGLSurface surface;
++static EGLContext context;
++static fbdev_window nativeWindow;
++
++qboolean GLOS_GetScreenSize( int *w, int *h )
++{
++	struct fb_var_screeninfo vi;
++	int fd = open( "/dev/fb0", O_RDONLY );
++	if ( fd < 0 || ioctl( fd, FBIOGET_VSCREENINFO, &vi ) < 0 ) {
++		if ( fd >= 0 )
++			close( fd );
++		Com_Printf( "glos: can't read /dev/fb0\n" );
++		return qfalse;
++	}
++	close( fd );
++	*w = vi.xres;
++	*h = vi.yres;
++	Com_Printf( "glos: fbdev %dx%d (virtual %dx%d, %d bpp)\n", vi.xres, vi.yres, vi.xres_virtual, vi.yres_virtual, vi.bits_per_pixel );
++	return qtrue;
++}
++
++qboolean GLOS_Start( int w, int h, int depthBits, int stencilBits )
++{
++	if ( access( "/dev/mali", F_OK ) != 0 ) {
++		Com_Printf( "glos: /dev/mali missing: start through ./glos/glos-gpu run mali\n" );
++		return qfalse;
++	}
++	maliLib = dlopen( "libMali.so", RTLD_NOW | RTLD_GLOBAL );
++	if ( !maliLib ) {
++		Com_Printf( "glos: can't load libMali.so: %s\n", dlerror() );
++		return qfalse;
++	}
++#define LOAD(f) *(void**)&egl.f = dlsym( maliLib, "egl" #f ); if ( !egl.f ) { Com_Printf( "glos: missing egl" #f "\n" ); return qfalse; }
++	LOAD(GetDisplay) LOAD(Initialize) LOAD(ChooseConfig) LOAD(CreateWindowSurface)
++	LOAD(CreateContext) LOAD(MakeCurrent) LOAD(SwapBuffers) LOAD(SwapInterval)
++	LOAD(DestroySurface) LOAD(DestroyContext) LOAD(Terminate) LOAD(GetError)
++#undef LOAD
++
++	display = egl.GetDisplay( EGL_DEFAULT_DISPLAY );
++	EGLint major, minor;
++	if ( !display || !egl.Initialize( display, &major, &minor ) ) {
++		Com_Printf( "glos: eglInitialize failed 0x%x\n", egl.GetError() );
++		return qfalse;
++	}
++	const EGLint attribs[] = {
++		EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
++		EGL_RENDERABLE_TYPE, EGL_OPENGL_ES_BIT,
++		EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8,
++		EGL_DEPTH_SIZE, depthBits, EGL_STENCIL_SIZE, stencilBits,
++		EGL_NONE
++	};
++	EGLConfig config;
++	EGLint n = 0;
++	if ( !egl.ChooseConfig( display, attribs, &config, 1, &n ) || n < 1 ) {
++		Com_Printf( "glos: no EGL config 0x%x\n", egl.GetError() );
++		return qfalse;
++	}
++	nativeWindow.width = w;
++	nativeWindow.height = h;
++	surface = egl.CreateWindowSurface( display, config, &nativeWindow, NULL );
++	const EGLint ctxAttribs[] = { EGL_CONTEXT_CLIENT_VERSION, 1, EGL_NONE };
++	context = egl.CreateContext( display, config, EGL_NO_CONTEXT, ctxAttribs );
++	if ( !surface || !context || !egl.MakeCurrent( display, surface, surface, context ) ) {
++		Com_Printf( "glos: surface/context failed 0x%x\n", egl.GetError() );
++		return qfalse;
++	}
++	Com_Printf( "glos: EGL %d.%d, GLES 1.1 context, %dx%d\n", major, minor, w, h );
++	return qtrue;
++}
++
++/*
++Tear-free flips. ARM's fbdev EGL returns from eglSwapBuffers at once and
++flips (FBIOPAN_DISPLAY, which returns at the vblank) on a thread of its own.
++With two buffers the GPU would then draw the next frame into the one still
++on screen: tearing, and a flicker between two frames. So each frame waits
++before its flush until the previous frame's flip has landed (JK2_FLIP_WAIT=0
++turns it off). The flips are counted here: the binary exports ioctl, so
++libMali's calls land in this one. From ga36-maxpayne-port.
++JK2_LOG_FPS=1 logs frames per second and the wait twice a second.
++*/
++static pthread_mutex_t flipLock = PTHREAD_MUTEX_INITIALIZER;
++static pthread_cond_t flipCond = PTHREAD_COND_INITIALIZER;
++static unsigned flipsDone, swapsDone;
++
++extern "C" __attribute__(( visibility( "default" ) )) int ioctl( int fd, unsigned long request, ... )
++{
++	static int (*real)( int, unsigned long, void * );
++	if ( !real )
++		real = (int (*)( int, unsigned long, void * ))dlsym( RTLD_NEXT, "ioctl" );
++	va_list ap;
++	va_start( ap, request );
++	void *arg = va_arg( ap, void * );
++	va_end( ap );
++	int r = real( fd, request, arg );
++	if ( request == FBIOPAN_DISPLAY ) {
++		int e = errno;
++		pthread_mutex_lock( &flipLock );
++		flipsDone++;
++		pthread_cond_broadcast( &flipCond );
++		pthread_mutex_unlock( &flipLock );
++		errno = e;
++	}
++	return r;
++}
++
++static void WaitPreviousFlip( void )
++{
++	struct timespec t;
++	clock_gettime( CLOCK_REALTIME, &t );
++	t.tv_nsec += 100 * 1000000; // never hang on a flip that doesn't come
++	if ( t.tv_nsec >= 1000000000 ) {
++		t.tv_sec++;
++		t.tv_nsec -= 1000000000;
++	}
++	pthread_mutex_lock( &flipLock );
++	// a flip that comes late stays owed: counting it as done would let every
++	// later frame tear
++	while ( (int)( flipsDone - swapsDone ) < 0 )
++		if ( pthread_cond_timedwait( &flipCond, &flipLock, &t ) == ETIMEDOUT )
++			break;
++	pthread_mutex_unlock( &flipLock );
++}
++
++static double NowMs( void )
++{
++	struct timespec t;
++	clock_gettime( CLOCK_MONOTONIC, &t );
++	return t.tv_sec * 1e3 + t.tv_nsec / 1e6;
++}
++
++void GLOS_Swap( void )
++{
++	static int flipWait = -1, logFps;
++	static double windowStart, waitMs;
++	static int frames;
++	if ( flipWait < 0 ) {
++		const char *v = getenv( "JK2_FLIP_WAIT" );
++		flipWait = !( v && *v == '0' );
++		v = getenv( "JK2_LOG_FPS" );
++		logFps = v && *v && *v != '0';
++		// the driver flips once when the surface is made: count from here
++		pthread_mutex_lock( &flipLock );
++		flipsDone = swapsDone = 0;
++		pthread_mutex_unlock( &flipLock );
++		windowStart = NowMs();
++	} else if ( flipWait ) {
++		double t0 = logFps ? NowMs() : 0;
++		WaitPreviousFlip();
++		if ( logFps )
++			waitMs += NowMs() - t0;
++	}
++	egl.SwapBuffers( display, surface );
++	pthread_mutex_lock( &flipLock );
++	swapsDone++;
++	pthread_mutex_unlock( &flipLock );
++	if ( logFps ) {
++		frames++;
++		double now = NowMs();
++		if ( now - windowStart >= 500.0 ) {
++			Com_Printf( "glos: FPS %.1f, flip wait %.1f ms/frame\n", frames * 1000.0 / ( now - windowStart ), waitMs / frames );
++			frames = 0;
++			waitMs = 0;
++			windowStart = now;
++		}
++	}
++}
++
++void GLOS_SetSwapInterval( int interval )
++{
++	egl.SwapInterval( display, interval );
++}
++
++void GLOS_Stop( void )
++{
++	if ( !display )
++		return;
++	egl.MakeCurrent( display, NULL, NULL, EGL_NO_CONTEXT );
++	if ( context )
++		egl.DestroyContext( display, context );
++	if ( surface )
++		egl.DestroySurface( display, surface );
++	egl.Terminate( display );
++	display = surface = context = NULL;
++}
++
++#endif // GLOS_GLES1
+diff --git a/shared/sdl/sdl_glos.h b/shared/sdl/sdl_glos.h
+new file mode 100644
+index 0000000..792979a
+--- /dev/null
++++ b/shared/sdl/sdl_glos.h
+@@ -0,0 +1,16 @@
++#pragma once
++// GLES 1.1 window on ARM's Mali driver (EGL on /dev/fb0), see sdl_glos.cpp.
++#ifdef GLOS_GLES1
++qboolean GLOS_GetScreenSize( int *w, int *h );
++qboolean GLOS_Start( int w, int h, int depthBits, int stencilBits );
++void GLOS_Swap( void );
++void GLOS_SetSwapInterval( int interval );
++void GLOS_Stop( void );
++
++// twin-stick gamepad, sdl_glospad.cpp
++extern float glosPadMove[2], glosPadLook[2], glosLookSpeed;
++extern qboolean glosPadActive;
++void GLOS_PadInit( void );
++void GLOS_PadShutdown( void );
++qboolean GLOS_PadFrame( int frameMsec );
++#endif
+diff --git a/shared/sdl/sdl_glospad.cpp b/shared/sdl/sdl_glospad.cpp
+new file mode 100644
+index 0000000..ee779f3
+--- /dev/null
++++ b/shared/sdl/sdl_glospad.cpp
+@@ -0,0 +1,182 @@
++/*
++sdl_glospad.cpp: twin-stick gamepad for goodluckOS (the GA36-MB's pad through
++SDL's game controller API, layout from SDL_GAMECONTROLLERCONFIG in start.sh).
++
++In game: left stick moves (analog), right stick aims (CL_JoystickMove reads
++glosPadMove / glosPadLook), buttons are the keys JOY1..JOY15 that glos-pad.cfg
++binds, Start is Escape. In menus: the left stick moves the cursor, A clicks,
++B and Start go back, the d-pad sends the cursor keys.
++
++Stick shaping, from start.sh:
++  JK2_STICK_SCALE     multiplies stick values (the GA36-MB's sticks reach ~2/3)
++  JK2_STICK_DEADZONE  radial dead zone after scaling (0..1)
++  JK2_LOOK_SPEED      turn rate at full right-stick deflection, degrees/second
++  JK2_LOOK_CURVE      response exponent for the right stick (1 = linear)
++*/
++#ifdef GLOS_GLES1
++
++#include <SDL.h>
++#include <math.h>
++#include <stdlib.h>
++
++#include "qcommon/qcommon.h"
++#include "client/client.h"
++#include "sys/sys_local.h"
++#include "sdl_glos.h"
++
++float glosPadMove[2], glosPadLook[2];
++float glosLookSpeed = 180.0f;
++qboolean glosPadActive;
++
++static SDL_GameController *pad;
++static float stickScale = 1.0f, deadZone = 0.12f, lookCurve = 2.0f;
++static bool held[SDL_CONTROLLER_BUTTON_MAX];
++static int heldKey[SDL_CONTROLLER_BUTTON_MAX];
++static float cursorFrac[2];
++
++static float EnvFloat( const char *name, float def )
++{
++	const char *v = getenv( name );
++	return v && *v ? (float)atof( v ) : def;
++}
++
++void GLOS_PadInit( void )
++{
++	stickScale = EnvFloat( "JK2_STICK_SCALE", 1.0f );
++	deadZone = EnvFloat( "JK2_STICK_DEADZONE", 0.12f );
++	glosLookSpeed = EnvFloat( "JK2_LOOK_SPEED", 180.0f );
++	lookCurve = EnvFloat( "JK2_LOOK_CURVE", 2.0f );
++
++	if ( !SDL_WasInit( SDL_INIT_GAMECONTROLLER ) && SDL_InitSubSystem( SDL_INIT_GAMECONTROLLER ) < 0 ) {
++		Com_Printf( "glos pad: SDL_INIT_GAMECONTROLLER failed: %s\n", SDL_GetError() );
++		return;
++	}
++	for ( int i = 0; i < SDL_NumJoysticks(); i++ ) {
++		if ( SDL_IsGameController( i ) && ( pad = SDL_GameControllerOpen( i ) ) != NULL ) {
++			Com_Printf( "glos pad: %s (scale %.2f, dead zone %.2f, look %.0f deg/s, curve %.1f)\n",
++				SDL_GameControllerName( pad ), stickScale, deadZone, glosLookSpeed, lookCurve );
++			glosPadActive = qtrue;
++			return;
++		}
++	}
++	Com_Printf( "glos pad: no game controller\n" );
++}
++
++void GLOS_PadShutdown( void )
++{
++	if ( pad )
++		SDL_GameControllerClose( pad );
++	pad = NULL;
++	glosPadActive = qfalse;
++}
++
++// Scaled stick with a radial dead zone, rescaled so the edge of the dead zone is 0.
++static void ReadStick( SDL_GameControllerAxis ax, SDL_GameControllerAxis ay, float out[2] )
++{
++	float x = SDL_GameControllerGetAxis( pad, ax ) / 32767.0f * stickScale;
++	float y = SDL_GameControllerGetAxis( pad, ay ) / 32767.0f * stickScale;
++	float len = sqrtf( x * x + y * y );
++	if ( len <= deadZone ) {
++		out[0] = out[1] = 0;
++		return;
++	}
++	float shaped = ( len - deadZone ) / ( 1.0f - deadZone );
++	if ( shaped > 1.0f )
++		shaped = 1.0f;
++	out[0] = x / len * shaped;
++	out[1] = y / len * shaped;
++}
++
++static int MenuKey( int b )
++{
++	switch ( b ) {
++	case SDL_CONTROLLER_BUTTON_A: return A_MOUSE1;
++	case SDL_CONTROLLER_BUTTON_B: return A_ESCAPE;
++	case SDL_CONTROLLER_BUTTON_START: return A_ESCAPE;
++	case SDL_CONTROLLER_BUTTON_DPAD_UP: return A_CURSOR_UP;
++	case SDL_CONTROLLER_BUTTON_DPAD_DOWN: return A_CURSOR_DOWN;
++	case SDL_CONTROLLER_BUTTON_DPAD_LEFT: return A_CURSOR_LEFT;
++	case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: return A_CURSOR_RIGHT;
++	}
++	return 0;
++}
++
++static int GameKey( int b )
++{
++	if ( b == SDL_CONTROLLER_BUTTON_START )
++		return A_ESCAPE;
++	return A_JOY1 + b;	// JOY1 = A ... JOY15 = d-pad right, SDL's button order
++}
++
++qboolean GLOS_PadFrame( int frameMsec )
++{
++	// SDL turns SIGTERM/SIGINT (appctl stop-application) into SDL_QUIT; without
++	// SDL video IN_ProcessEvents never reads the queue, so do it here.
++	SDL_Event e;
++	while ( SDL_PollEvent( &e ) ) {
++		if ( e.type == SDL_QUIT ) {
++			Cbuf_ExecuteText( EXEC_NOW, "quit Received signal\n" );
++			return qtrue;
++		}
++	}
++
++	if ( !pad )
++		return qfalse;
++
++	SDL_GameControllerUpdate();
++	bool menu = ( Key_GetCatcher() & ( KEYCATCH_UI | KEYCATCH_CONSOLE ) ) != 0 || cls.state != CA_ACTIVE;
++
++	for ( int b = 0; b < SDL_CONTROLLER_BUTTON_MAX; b++ ) {
++		bool down = SDL_GameControllerGetButton( pad, (SDL_GameControllerButton)b ) != 0;
++		if ( down == held[b] )
++			continue;
++		held[b] = down;
++		if ( down ) {
++			heldKey[b] = menu ? MenuKey( b ) : GameKey( b );
++			if ( heldKey[b] )
++				Sys_QueEvent( 0, SE_KEY, heldKey[b], qtrue, 0, NULL );
++		} else if ( heldKey[b] ) {
++			// release the key that was pressed, even if the mode changed meanwhile
++			Sys_QueEvent( 0, SE_KEY, heldKey[b], qfalse, 0, NULL );
++			heldKey[b] = 0;
++		}
++	}
++
++	// triggers as buttons: LT = JOY16, RT = JOY17 (A_JOY1 + 15, 16)
++	static bool trig[2];
++	for ( int t = 0; t < 2; t++ ) {
++		bool down = SDL_GameControllerGetAxis( pad, t ? SDL_CONTROLLER_AXIS_TRIGGERRIGHT : SDL_CONTROLLER_AXIS_TRIGGERLEFT ) > 16384;
++		if ( down != trig[t] ) {
++			trig[t] = down;
++			Sys_QueEvent( 0, SE_KEY, menu ? ( t ? A_MOUSE1 : A_ESCAPE ) : A_JOY1 + 15 + t, down, 0, NULL );
++		}
++	}
++
++	float move[2], look[2];
++	ReadStick( SDL_CONTROLLER_AXIS_LEFTX, SDL_CONTROLLER_AXIS_LEFTY, move );
++	ReadStick( SDL_CONTROLLER_AXIS_RIGHTX, SDL_CONTROLLER_AXIS_RIGHTY, look );
++
++	if ( menu ) {
++		glosPadMove[0] = glosPadMove[1] = glosPadLook[0] = glosPadLook[1] = 0;
++		// cursor: up to 480 virtual pixels a second with either stick
++		float cx = move[0] + look[0], cy = move[1] + look[1];
++		for ( int i = 0; i < 2; i++ ) {
++			cursorFrac[i] += ( i ? cy : cx ) * 480.0f * frameMsec / 1000.0f;
++		}
++		int dx = (int)cursorFrac[0], dy = (int)cursorFrac[1];
++		cursorFrac[0] -= dx; cursorFrac[1] -= dy;
++		if ( dx || dy )
++			Sys_QueEvent( 0, SE_MOUSE, dx, dy, 0, NULL );
++		return qtrue;
++	}
++
++	glosPadMove[0] = move[0];
++	glosPadMove[1] = move[1];
++	for ( int i = 0; i < 2; i++ ) {
++		float m = fabsf( look[i] );
++		glosPadLook[i] = look[i] < 0 ? -powf( m, lookCurve ) : powf( m, lookCurve );
++	}
++	return qtrue;
++}
++
++#endif // GLOS_GLES1
+diff --git a/shared/sdl/sdl_input.cpp b/shared/sdl/sdl_input.cpp
+index 4987bd7..1e23f8a 100644
+--- a/shared/sdl/sdl_input.cpp
++++ b/shared/sdl/sdl_input.cpp
+@@ -24,6 +24,7 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
+ #include "qcommon/q_shared.h"
+ #include "client/client.h"
+ #include "sys/sys_local.h"
++#include "sdl_glos.h"
+ 
+ static cvar_t *in_keyboardDebug     = NULL;
+ 
+@@ -609,11 +610,13 @@ static void IN_InitJoystick( void )
+ 
+ void IN_Init( void *windowData )
+ {
++#ifndef GLOS_GLES1
+ 	if( !SDL_WasInit( SDL_INIT_VIDEO ) )
+ 	{
+ 		Com_Error( ERR_FATAL, "IN_Init called before SDL_Init( SDL_INIT_VIDEO )" );
+ 		return;
+ 	}
++#endif
+ 
+ 	SDL_window = (SDL_Window *)windowData;
+ 
+@@ -628,7 +631,9 @@ void IN_Init( void *windowData )
+ 	in_mouse = Cvar_Get( "in_mouse", "1", CVAR_ARCHIVE );
+ 	in_nograb = Cvar_Get( "in_nograb", "0", CVAR_ARCHIVE_ND );
+ 
++#ifndef GLOS_GLES1
+ 	SDL_StartTextInput( );
++#endif
+ 
+ 	mouseAvailable = (qboolean)( in_mouse->value != 0 );
+ 	if ( in_mouse->integer == 2 ) {
+@@ -641,9 +646,16 @@ void IN_Init( void *windowData )
+ 	}
+ 	IN_DeactivateMouse( );
+ 
++#ifdef GLOS_GLES1
++	// the dummy video driver's window never has focus; the game is always in front
++	Cvar_SetValue( "com_unfocused", 0 );
++	Cvar_SetValue( "com_minimized", 0 );
++	GLOS_PadInit( );
++#else
+ 	int appState = SDL_GetWindowFlags( SDL_window );
+ 	Cvar_SetValue( "com_unfocused", ( appState & SDL_WINDOW_INPUT_FOCUS ) == 0 );
+ 	Cvar_SetValue( "com_minimized", ( appState & SDL_WINDOW_MINIMIZED ) != 0 );
++#endif
+ 
+ 	IN_InitJoystick( );
+ 	Com_DPrintf( "------------------------------------\n" );
+@@ -1153,6 +1165,13 @@ static void IN_JoyMove( void )
+ void IN_Frame (void) {
+ 	qboolean loading;
+ 
++#ifdef GLOS_GLES1
++	static int lastFrame;
++	int now = Sys_Milliseconds();
++	int msec = lastFrame ? now - lastFrame : 0;
++	lastFrame = now;
++	if ( !GLOS_PadFrame( msec > 100 ? 100 : msec ) )
++#endif
+ 	IN_JoyMove( );
+ 
+ 	// If not DISCONNECTED (main menu) or ACTIVE (in game), we're loading
+@@ -1205,6 +1224,9 @@ void IN_Shutdown( void ) {
+ 	mouseAvailable = qfalse;
+ 
+ 	IN_ShutdownJoystick( );
++#ifdef GLOS_GLES1
++	GLOS_PadShutdown( );
++#endif
+ 
+ 	SDL_window = NULL;
+ }
+diff --git a/shared/sdl/sdl_window.cpp b/shared/sdl/sdl_window.cpp
+index 18daa06..c30025e 100644
+--- a/shared/sdl/sdl_window.cpp
++++ b/shared/sdl/sdl_window.cpp
+@@ -25,6 +25,7 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
+ #include "rd-common/tr_types.h"
+ #include "sys/sys_local.h"
+ #include "sdl_icon.h"
++#include "sdl_glos.h"
+ 
+ enum rserr_t
+ {
+@@ -146,6 +147,15 @@ void WIN_Present( window_t *window )
+ {
+ 	if ( window->api == GRAPHICS_API_OPENGL )
+ 	{
++#ifdef GLOS_GLES1
++		GLOS_Swap();
++		if ( r_swapInterval->modified )
++		{
++			r_swapInterval->modified = qfalse;
++			GLOS_SetSwapInterval( r_swapInterval->integer );
++		}
++		return;
++#endif
+ 		SDL_GL_SwapWindow(screen);
+ 
+ 		if ( r_swapInterval->modified )
+@@ -755,6 +765,35 @@ window_t WIN_Init( const windowDesc_t *windowDesc, glconfig_t *glConfig )
+ 	r_ext_multisample	= Cvar_Get( "r_ext_multisample",	"0",		CVAR_ARCHIVE_ND|CVAR_LATCH );
+ 	Cvar_Get( "r_availableModes", "", CVAR_ROM );
+ 
++#ifdef GLOS_GLES1
++	// No SDL video: ARM's driver draws to /dev/fb0 through EGL, SDL only reads the pad.
++	// The window, context and input live for the whole run: vid_restart (a changed
++	// video setting) keeps them, as the screen size never changes.
++	static qboolean glosStarted;
++	if ( !glosStarted ) {
++		if ( SDL_InitSubSystem( SDL_INIT_EVENTS | SDL_INIT_JOYSTICK | SDL_INIT_GAMECONTROLLER ) < 0 )
++			Com_Printf( "SDL input init failed: %s\n", SDL_GetError() );
++		if ( !GLOS_GetScreenSize( &glConfig->vidWidth, &glConfig->vidHeight ) ||
++			!GLOS_Start( glConfig->vidWidth, glConfig->vidHeight, r_depthbits->integer ? r_depthbits->integer : 24, r_stencilbits->integer ? 8 : 0 ) )
++			Com_Error( ERR_FATAL, "GLimp_Init() - no EGL window on /dev/fb0" );
++		IN_Init( NULL );
++		glosStarted = qtrue;
++	} else if ( !GLOS_GetScreenSize( &glConfig->vidWidth, &glConfig->vidHeight ) )
++		Com_Error( ERR_FATAL, "GLimp_Init() - can't read /dev/fb0" );
++	GLOS_SetSwapInterval( r_swapInterval->integer );
++	r_swapInterval->modified = qfalse;
++	glConfig->colorBits = 24;
++	glConfig->depthBits = r_depthbits->integer ? r_depthbits->integer : 24;
++	glConfig->stencilBits = r_stencilbits->integer ? 8 : 0;
++	glConfig->isFullscreen = qtrue;
++	glConfig->stereoEnabled = qfalse;
++	glConfig->displayFrequency = 60;
++	glConfig->deviceSupportsGamma = qfalse;
++	window_t glosWindow = {};
++	glosWindow.api = windowDesc->api;
++	return glosWindow;
++#endif
++
+ 	// Create the window and set up the context
+ 	if(!GLimp_StartDriverAndSetMode( glConfig, windowDesc, r_mode->integer,
+ 										(qboolean)r_fullscreen->integer, (qboolean)r_noborder->integer ))
+@@ -812,8 +851,11 @@ void WIN_Shutdown( void )
+ 	Cmd_RemoveCommand("modelist");
+ 	Cmd_RemoveCommand("minimize");
+ 
++#ifdef GLOS_GLES1
++	// kept until the process exits (see WIN_Init); the driver's files close with it
++	return;
++#endif
+ 	IN_Shutdown();
+-
+ 	if ( opengl_context ) {
+ 		SDL_GL_DeleteContext( opengl_context );
+ 		opengl_context = NULL;

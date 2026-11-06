@@ -1,0 +1,6 @@
+[Entry]
+CATEGORY=Games
+NAME=Star Wars Jedi Knight II: Jedi Outcast
+DESCRIPTION=Running natively via OpenJK
+COMMAND=/home/player/ports/jk2/start.sh
+ICON=/home/player/ports/jk2/icon.png
